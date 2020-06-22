@@ -1,0 +1,899 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
+<head>
+<meta charset="utf-8" />
+<meta name="generator" content="pandoc" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+<title>Forecasting Future Sales</title>
+
+<link rel="stylesheet" href="pandoc.css" />
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" type="text/javascript"></script>
+<!--[if lt IE 9]>
+<script src="//cdnjs.cloudflare.com/ajax/libs/html5shiv/3.7.3/html5shiv-printshiv.min.js"></script>
+<![endif]-->
+</head>
+<body>
+
+
+
+<header id="title-block-header">
+<h1 class="title">Forecasting Future Sales</h1>
+
+
+
+</header>
+
+
+
+<h2 id="introduction">Introduction</h2>
+<p>The art of predicting the future is both magical and mundane. Without some confidence that we can understand the causal dynamics of the cosmos, all attempts at decision-making would be rendered null and void. But the non-linear and chaotic interactions between the universe’s varied forces of causation mean that forecasting the behaviour of complex systems in advance can be incredibly difficult <span class="citation" data-cites="ELorenz1972">(Lorenz 1972)</span>.</p>
+<p>In this report I describe my attempt to use 942 days of sales data for 1,115 drug stores located across Germany to predict daily sales for the subsequent 6 weeks. For the sake of reproducible research <span class="citation" data-cites="RPeng2011">(Peng 2011)</span>, I include all my code in expandable chunks at the appropriate points throughout this text.</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1"></a><span class="im">import</span> pandas <span class="im">as</span> pd</span>
+<span id="cb1-2"><a href="#cb1-2"></a><span class="im">from</span> pandas <span class="im">import</span> Timestamp</span>
+<span id="cb1-3"><a href="#cb1-3"></a><span class="im">import</span> calendar</span>
+<span id="cb1-4"><a href="#cb1-4"></a><span class="im">import</span> numpy <span class="im">as</span> np</span>
+<span id="cb1-5"><a href="#cb1-5"></a><span class="im">import</span> matplotlib.pyplot <span class="im">as</span> plt</span>
+<span id="cb1-6"><a href="#cb1-6"></a><span class="im">import</span> statsmodels.api <span class="im">as</span> sm</span>
+<span id="cb1-7"><a href="#cb1-7"></a><span class="im">from</span> statsmodels.formula.api <span class="im">import</span> ols</span>
+<span id="cb1-8"><a href="#cb1-8"></a><span class="im">from</span> sklearn.metrics <span class="im">import</span> make_scorer</span>
+<span id="cb1-9"><a href="#cb1-9"></a><span class="im">from</span> sklearn.linear_model <span class="im">import</span> LinearRegression</span>
+<span id="cb1-10"><a href="#cb1-10"></a><span class="im">from</span> mlxtend.feature_selection <span class="im">import</span> ExhaustiveFeatureSelector <span class="im">as</span> EFS</span>
+<span id="cb1-11"><a href="#cb1-11"></a><span class="im">from</span> IPython.display <span class="im">import</span> HTML</span></code></pre></div>
+<div class="sourceCode" id="cb2"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1"></a><span class="co">## avoid cluttering page with warnings</span></span>
+<span id="cb2-2"><a href="#cb2-2"></a><span class="im">import</span> warnings<span class="op">;</span> warnings.filterwarnings(<span class="st">&#39;ignore&#39;</span>)</span></code></pre></div>
+<h2 id="the-data">The Data</h2>
+<p>The first step in data analysis is data exploration. The data was given in the form of three CSV files: <code>stores.csv</code> contained information for each pseudonymised store regarding their <code>StoreType</code>, their <code>Assortment</code> of stock, some data about <code>Competition</code>, and the store’s involvement with an ongoing coupon campaign referred to as <code>Promo2</code>; <code>train.csv</code> contained daily <code>Sales</code> and <code>Customers</code> data, including also information as to whether the day was an official <code>Holiday</code>, whether the store was <code>Open</code> that day, and whether the store was running a store-specific <code>Promo</code>; <code>test.csv</code> contained identical features, but with <code>Sales</code> and <code>Customers</code> data removed, so that the forecast can be tested.</p>
+<h3 id="parsing-dates">Parsing Dates</h3>
+<p>Python’s <code>pandas</code> library <span class="citation" data-cites="WMcKinney2010">(McKinney 2010)</span> for dataframe manipulation provides a powerful set of tools for manipulating dates – all we have to do is specify which columns should be parsed as such when we load our data.</p>
+<div class="sourceCode" id="cb3"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1"></a>training_data <span class="op">=</span> pd.read_csv(<span class="st">&#39;../data/raw/train.csv&#39;</span>, parse_dates<span class="op">=</span>[<span class="st">&#39;Date&#39;</span>])</span>
+<span id="cb3-2"><a href="#cb3-2"></a>test_data <span class="op">=</span> pd.read_csv(<span class="st">&#39;../data/raw/test.csv&#39;</span>, parse_dates<span class="op">=</span>[<span class="st">&#39;Date&#39;</span>])</span></code></pre></div>
+<p>Actually, that is not quite true; for non-standard datetime parsing, we need to use <code>pd.to_datetime()</code> after <code>pd.read_csv()</code>. This is the case with the dates given for when each store began experiencing competition, and (separately) participating in <code>Promo2</code>.</p>
+<div class="sourceCode" id="cb4"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1"></a>store_data <span class="op">=</span> pd.read_csv(<span class="st">&#39;../data/raw/store.csv&#39;</span>,</span>
+<span id="cb4-2"><a href="#cb4-2"></a>                        parse_dates<span class="op">=</span>{<span class="st">&#39;CompetitionDate&#39;</span>:[<span class="dv">5</span>,<span class="dv">4</span>],</span>
+<span id="cb4-3"><a href="#cb4-3"></a>                                     <span class="st">&#39;Promo2Date&#39;</span>:[<span class="dv">8</span>,<span class="dv">7</span>]})</span></code></pre></div>
+<div class="sourceCode" id="cb5"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb5-1"><a href="#cb5-1"></a>store_data[<span class="st">&#39;CompetitionDate&#39;</span>] <span class="op">=</span> pd.to_datetime(</span>
+<span id="cb5-2"><a href="#cb5-2"></a>    store_data.CompetitionDate.astype(<span class="bu">str</span>), </span>
+<span id="cb5-3"><a href="#cb5-3"></a>    <span class="bu">format</span><span class="op">=</span><span class="st">&#39;%Y %m&#39;</span>,</span>
+<span id="cb5-4"><a href="#cb5-4"></a>    errors<span class="op">=</span><span class="st">&#39;coerce&#39;</span>)</span></code></pre></div>
+<div class="sourceCode" id="cb6"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1"></a>store_data[<span class="st">&#39;Promo2Date&#39;</span>] <span class="op">=</span> pd.to_datetime(</span>
+<span id="cb6-2"><a href="#cb6-2"></a>    <span class="co">## we have to insert a dummy &#39;dayofweek&#39; value (ie. &#39;1&#39;)</span></span>
+<span id="cb6-3"><a href="#cb6-3"></a>    <span class="co">## ... or it won&#39;t work</span></span>
+<span id="cb6-4"><a href="#cb6-4"></a>    store_data.Promo2Date.astype(<span class="bu">str</span>)<span class="op">+</span><span class="st">&#39; 1&#39;</span>,</span>
+<span id="cb6-5"><a href="#cb6-5"></a>    <span class="bu">format</span><span class="op">=</span><span class="st">&#39;%Y %W %w&#39;</span>,</span>
+<span id="cb6-6"><a href="#cb6-6"></a>    errors<span class="op">=</span><span class="st">&#39;coerce&#39;</span>)</span></code></pre></div>
+<h3 id="stores-data-data-cleaning">Stores Data: Data Cleaning</h3>
+<p>On loading the Stores Data, it appeared that there were two unnamed columns in the table – but this proved to be merely a stray space on the top row.</p>
+<div class="sourceCode" id="cb7"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb7-1"><a href="#cb7-1"></a><span class="cf">with</span> <span class="bu">open</span>(<span class="st">&#39;../data/raw/store.csv&#39;</span>,<span class="st">&#39;r&#39;</span>) <span class="im">as</span> f:</span>
+<span id="cb7-2"><a href="#cb7-2"></a>    txt <span class="op">=</span> f.read().split(<span class="st">&#39;</span><span class="ch">\n</span><span class="st">&#39;</span>)</span>
+<span id="cb7-3"><a href="#cb7-3"></a><span class="cf">for</span> i, line <span class="kw">in</span> <span class="bu">enumerate</span>(txt):</span>
+<span id="cb7-4"><a href="#cb7-4"></a>    col_11_value <span class="op">=</span> line.split(<span class="st">&#39;,&#39;</span>)[<span class="op">-</span><span class="dv">1</span>]</span>
+<span id="cb7-5"><a href="#cb7-5"></a>    <span class="cf">if</span> <span class="bu">len</span>(col_11_value)<span class="op">&gt;</span><span class="dv">0</span>:</span>
+<span id="cb7-6"><a href="#cb7-6"></a>        <span class="bu">print</span>(<span class="ss">f&#39;Line </span><span class="sc">{i}</span><span class="ss"> had &quot;</span><span class="sc">{</span>col_11_value<span class="sc">}</span><span class="ss">&quot; in the final column.&#39;</span>)</span></code></pre></div>
+<pre><code>Line 1 had &quot; &quot; in the final column.</code></pre>
+<p>The imposter columns were therefore removed.</p>
+<div class="sourceCode" id="cb9"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb9-1"><a href="#cb9-1"></a>store_data.drop(columns<span class="op">=</span>[<span class="st">&quot;Unnamed: 11&quot;</span>, <span class="st">&quot;Unnamed: 10&quot;</span>], inplace<span class="op">=</span><span class="va">True</span>)</span></code></pre></div>
+<h3 id="sales-data-muddled-dates">Sales Data: Muddled Dates</h3>
+<p>The Sales Data is supposed to be divided by date into two sets: a training set that goes from the beginning of 2013 until the end of July 2015, and a test set that goes from the start of August 2015. However, inspection suggested both datasets strayed outside these bounds, apparently including data from December 2015.</p>
+<div class="sourceCode" id="cb10"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb10-1"><a href="#cb10-1"></a><span class="bu">print</span>(<span class="ss">f&#39;The latest date in `train.csv` is </span><span class="sc">{</span><span class="bu">max</span>(training_data.Date)<span class="sc">}</span><span class="ss">.</span><span class="ch">\n</span><span class="ss">&#39;</span></span>
+<span id="cb10-2"><a href="#cb10-2"></a>        <span class="op">+</span> <span class="ss">f&#39;The latest date in `test.csv` is </span><span class="sc">{</span><span class="bu">max</span>(test_data.Date)<span class="sc">}</span><span class="ss">.&#39;</span>)</span></code></pre></div>
+<pre><code>The latest date in `train.csv` is 2015-12-07 00:00:00.
+The latest date in `test.csv` is 2015-12-09 00:00:00.</code></pre>
+<p>This was because for all dates where the date of the month was less than or equal to twelve, the day and the month had been reversed, which we can see since the data is otherwise in perfect chronological order (Fig.1). So the first step in data cleaning was iterating through the dates and unmuddling the month and day.</p>
+<div class="sourceCode" id="cb12"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb12-1"><a href="#cb12-1"></a><span class="co">## set number of stores</span></span>
+<span id="cb12-2"><a href="#cb12-2"></a>n <span class="op">=</span> <span class="dv">1115</span></span>
+<span id="cb12-3"><a href="#cb12-3"></a></span>
+<span id="cb12-4"><a href="#cb12-4"></a><span class="kw">def</span> disordered_muddle(date_series, future_first<span class="op">=</span><span class="va">True</span>):</span>
+<span id="cb12-5"><a href="#cb12-5"></a>    <span class="co">&quot;&quot;&quot;Check whether a series of dates is disordered or just muddled&quot;&quot;&quot;</span></span>
+<span id="cb12-6"><a href="#cb12-6"></a>    disordered <span class="op">=</span> []</span>
+<span id="cb12-7"><a href="#cb12-7"></a>    muddle <span class="op">=</span> []</span>
+<span id="cb12-8"><a href="#cb12-8"></a>    dates <span class="op">=</span> date_series</span>
+<span id="cb12-9"><a href="#cb12-9"></a>    different_dates <span class="op">=</span> pd.Series(dates.unique())</span>
+<span id="cb12-10"><a href="#cb12-10"></a>    date <span class="op">=</span> different_dates[<span class="dv">0</span>]</span>
+<span id="cb12-11"><a href="#cb12-11"></a>    <span class="cf">for</span> i, d <span class="kw">in</span> <span class="bu">enumerate</span>(different_dates[<span class="dv">1</span>:]):</span>
+<span id="cb12-12"><a href="#cb12-12"></a>        <span class="co">## we expect the date&#39;s dayofyear to decrease by one</span></span>
+<span id="cb12-13"><a href="#cb12-13"></a>        <span class="cf">if</span> d.dayofyear<span class="op">!=</span>date.dayofyear<span class="op">-</span><span class="dv">1</span>:</span>
+<span id="cb12-14"><a href="#cb12-14"></a>            <span class="co">## unless the year is changing</span></span>
+<span id="cb12-15"><a href="#cb12-15"></a>            <span class="cf">if</span> d.year<span class="op">!=</span>date.year<span class="op">-</span><span class="dv">1</span>:</span>
+<span id="cb12-16"><a href="#cb12-16"></a>                <span class="cf">try</span>:</span>
+<span id="cb12-17"><a href="#cb12-17"></a>                    <span class="co">## we check if the day and month are muddled</span></span>
+<span id="cb12-18"><a href="#cb12-18"></a>                    <span class="co">## if d.day &gt; 12 this will cause an Exception</span></span>
+<span id="cb12-19"><a href="#cb12-19"></a>                    unmuddle <span class="op">=</span> Timestamp(d.year,d.day,d.month)</span>
+<span id="cb12-20"><a href="#cb12-20"></a>                    <span class="cf">if</span> unmuddle.dayofyear<span class="op">==</span>date.dayofyear<span class="op">-</span><span class="dv">1</span>:</span>
+<span id="cb12-21"><a href="#cb12-21"></a>                        muddle.append(d)</span>
+<span id="cb12-22"><a href="#cb12-22"></a>                        d <span class="op">=</span> unmuddle</span>
+<span id="cb12-23"><a href="#cb12-23"></a>                    <span class="cf">elif</span> unmuddle.year<span class="op">==</span>date.year<span class="op">-</span><span class="dv">1</span>:</span>
+<span id="cb12-24"><a href="#cb12-24"></a>                        muddle.append(d)</span>
+<span id="cb12-25"><a href="#cb12-25"></a>                        d <span class="op">=</span> unmuddle</span>
+<span id="cb12-26"><a href="#cb12-26"></a>                    <span class="cf">else</span>:</span>
+<span id="cb12-27"><a href="#cb12-27"></a>                        disordered.append(d)</span>
+<span id="cb12-28"><a href="#cb12-28"></a>                <span class="cf">except</span>:</span>
+<span id="cb12-29"><a href="#cb12-29"></a>                    disordered.append(d)</span>
+<span id="cb12-30"><a href="#cb12-30"></a>        date<span class="op">=</span>d</span>
+<span id="cb12-31"><a href="#cb12-31"></a>    <span class="cf">if</span> <span class="bu">len</span>(disordered)<span class="op">==</span><span class="dv">0</span> <span class="kw">and</span> <span class="bu">len</span>(muddle)<span class="op">==</span><span class="dv">0</span>:</span>
+<span id="cb12-32"><a href="#cb12-32"></a>        <span class="cf">return</span> <span class="va">False</span></span>
+<span id="cb12-33"><a href="#cb12-33"></a>    <span class="cf">else</span>:</span>
+<span id="cb12-34"><a href="#cb12-34"></a>        <span class="cf">return</span> disordered, muddle</span>
+<span id="cb12-35"><a href="#cb12-35"></a>    </span>
+<span id="cb12-36"><a href="#cb12-36"></a><span class="kw">def</span> unmuddle(date_series, muddled_values):</span>
+<span id="cb12-37"><a href="#cb12-37"></a>    <span class="co">&quot;&quot;&quot;Unmuddle dates where month and day have been confused&quot;&quot;&quot;</span></span>
+<span id="cb12-38"><a href="#cb12-38"></a>    date_correction <span class="op">=</span> {}</span>
+<span id="cb12-39"><a href="#cb12-39"></a></span>
+<span id="cb12-40"><a href="#cb12-40"></a>    <span class="cf">for</span> d <span class="kw">in</span> date_series:</span>
+<span id="cb12-41"><a href="#cb12-41"></a>        <span class="cf">if</span> d <span class="kw">in</span> muddled_values:</span>
+<span id="cb12-42"><a href="#cb12-42"></a>            date_correction[d] <span class="op">=</span> Timestamp(d.year, d.day, d.month)</span>
+<span id="cb12-43"><a href="#cb12-43"></a>        <span class="cf">else</span>:</span>
+<span id="cb12-44"><a href="#cb12-44"></a>            date_correction[d] <span class="op">=</span> Timestamp(d.year, d.month, d.day)</span>
+<span id="cb12-45"><a href="#cb12-45"></a></span>
+<span id="cb12-46"><a href="#cb12-46"></a>    <span class="cf">return</span> date_series.<span class="bu">map</span>(date_correction)</span></code></pre></div>
+<div class="sourceCode" id="cb13"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb13-1"><a href="#cb13-1"></a>disordered, muddle <span class="op">=</span> disordered_muddle(training_data.Date)</span>
+<span id="cb13-2"><a href="#cb13-2"></a>_, test_muddle <span class="op">=</span> disordered_muddle(test_data[<span class="st">&#39;Date&#39;</span>])</span>
+<span id="cb13-3"><a href="#cb13-3"></a></span>
+<span id="cb13-4"><a href="#cb13-4"></a>training_data[<span class="st">&#39;CorrectedDate&#39;</span>] <span class="op">=</span> unmuddle(training_data[<span class="st">&#39;Date&#39;</span>],muddle)</span>
+<span id="cb13-5"><a href="#cb13-5"></a>test_data[<span class="st">&#39;CorrectedDate&#39;</span>] <span class="op">=</span> unmuddle(test_data[<span class="st">&#39;Date&#39;</span>], test_muddle)</span></code></pre></div>
+<div class="sourceCode" id="cb14"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb14-1"><a href="#cb14-1"></a>plt.rcParams.update({<span class="st">&#39;font.size&#39;</span>: <span class="dv">15</span>})</span>
+<span id="cb14-2"><a href="#cb14-2"></a>fig, ax <span class="op">=</span> plt.subplots(figsize<span class="op">=</span>(<span class="dv">10</span>,<span class="dv">5</span>))</span>
+<span id="cb14-3"><a href="#cb14-3"></a>ax.plot(training_data.Date.unique(), label<span class="op">=</span><span class="st">&#39;Muddled Dates&#39;</span>,c<span class="op">=</span><span class="st">&#39;green&#39;</span>,ls<span class="op">=</span><span class="st">&#39;:&#39;</span>)</span>
+<span id="cb14-4"><a href="#cb14-4"></a>ax.plot(training_data.CorrectedDate.unique(), label<span class="op">=</span><span class="st">&#39;Corrected Dates&#39;</span>,c<span class="op">=</span><span class="st">&#39;blue&#39;</span>,ls<span class="op">=</span><span class="st">&#39;--&#39;</span>)</span>
+<span id="cb14-5"><a href="#cb14-5"></a>ax.legend()</span>
+<span id="cb14-6"><a href="#cb14-6"></a>plt.xlim(<span class="dv">0</span>,<span class="bu">len</span>(training_data.Date.unique()))</span>
+<span id="cb14-7"><a href="#cb14-7"></a>plt.xlabel(<span class="st">&#39;Order&#39;</span>)</span>
+<span id="cb14-8"><a href="#cb14-8"></a>plt.ylabel(<span class="st">&#39;Date&#39;</span>)</span>
+<span id="cb14-9"><a href="#cb14-9"></a>fig.suptitle(<span class="st">&#39;Muddled Dates&#39;</span>, y<span class="op">=</span><span class="dv">0</span>)</span>
+<span id="cb14-10"><a href="#cb14-10"></a>fig.savefig(<span class="st">&#39;../figures/muddled_dates.png&#39;</span>)</span>
+<span id="cb14-11"><a href="#cb14-11"></a>plt.tight_layout()</span>
+<span id="cb14-12"><a href="#cb14-12"></a>plt.savefig(<span class="st">&#39;../figures/muddledates.png&#39;</span>)</span></code></pre></div>
+<p><img src="../figures/draft_figure12_1.png" /><br />
+</p>
+<div class="sourceCode" id="cb15"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb15-1"><a href="#cb15-1"></a>training_data[<span class="st">&#39;Date&#39;</span>] <span class="op">=</span> training_data[<span class="st">&#39;CorrectedDate&#39;</span>]</span>
+<span id="cb15-2"><a href="#cb15-2"></a>training_data.drop(columns<span class="op">=</span>[<span class="st">&#39;CorrectedDate&#39;</span>],inplace<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb15-3"><a href="#cb15-3"></a>test_data[<span class="st">&#39;Date&#39;</span>] <span class="op">=</span> test_data[<span class="st">&#39;CorrectedDate&#39;</span>]</span>
+<span id="cb15-4"><a href="#cb15-4"></a>test_data.drop(columns<span class="op">=</span>[<span class="st">&#39;CorrectedDate&#39;</span>],inplace<span class="op">=</span><span class="va">True</span>)</span></code></pre></div>
+<h3 id="sales-data-missing-dates">Sales Data: Missing Dates</h3>
+<p>Once the dates had been unmuddled, it became clear that 180 stores were missing all dates from the second half of 2014 – that is, from the 1st July to the 31st December.</p>
+<div class="sourceCode" id="cb16"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb16-1"><a href="#cb16-1"></a>n <span class="op">=</span> <span class="bu">len</span>(store_data)</span>
+<span id="cb16-2"><a href="#cb16-2"></a>dates_for_store <span class="op">=</span> {}</span>
+<span id="cb16-3"><a href="#cb16-3"></a>stores <span class="op">=</span> []</span>
+<span id="cb16-4"><a href="#cb16-4"></a></span>
+<span id="cb16-5"><a href="#cb16-5"></a><span class="co">## iterate over Stores and get set of dates for each</span></span>
+<span id="cb16-6"><a href="#cb16-6"></a><span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">1</span>, n<span class="op">+</span><span class="dv">1</span>):</span>
+<span id="cb16-7"><a href="#cb16-7"></a>    dates_for_store[i] <span class="op">=</span> <span class="bu">set</span>(training_data.loc[training_data.Store<span class="op">==</span>i].Date)</span>
+<span id="cb16-8"><a href="#cb16-8"></a>    <span class="co">## I know from further analysis that 758 is the magic number</span></span>
+<span id="cb16-9"><a href="#cb16-9"></a>    <span class="co">## ... this is for demonstration purposes</span></span>
+<span id="cb16-10"><a href="#cb16-10"></a>    <span class="cf">if</span> <span class="bu">len</span>(dates_for_store[i]) <span class="op">==</span> <span class="dv">758</span>:</span>
+<span id="cb16-11"><a href="#cb16-11"></a>        stores.append(i)</span>
+<span id="cb16-12"><a href="#cb16-12"></a></span>
+<span id="cb16-13"><a href="#cb16-13"></a><span class="co">## find missing dates by difference of set of all dates and non-missing dates</span></span>
+<span id="cb16-14"><a href="#cb16-14"></a>non_missing_dates <span class="op">=</span> <span class="bu">set</span>()</span>
+<span id="cb16-15"><a href="#cb16-15"></a><span class="cf">for</span> i <span class="kw">in</span> stores:</span>
+<span id="cb16-16"><a href="#cb16-16"></a>    non_missing_dates <span class="op">=</span> non_missing_dates.union(dates_for_store[i])</span>
+<span id="cb16-17"><a href="#cb16-17"></a>all_dates <span class="op">=</span> <span class="bu">set</span>(training_data[<span class="st">&#39;Date&#39;</span>])</span>
+<span id="cb16-18"><a href="#cb16-18"></a>missing_dates <span class="op">=</span> all_dates.difference(non_missing_dates)</span>
+<span id="cb16-19"><a href="#cb16-19"></a><span class="co">## show that there are indeed 758 missing dates</span></span>
+<span id="cb16-20"><a href="#cb16-20"></a><span class="cf">assert</span> (<span class="bu">len</span>(missing_dates) <span class="op">==</span> <span class="bu">len</span>(training_data.Date.unique()) <span class="op">-</span> <span class="dv">758</span>)</span>
+<span id="cb16-21"><a href="#cb16-21"></a></span>
+<span id="cb16-22"><a href="#cb16-22"></a><span class="co">## show that the missing dates are an unbroken daily range</span></span>
+<span id="cb16-23"><a href="#cb16-23"></a>start <span class="op">=</span> <span class="bu">min</span>(missing_dates)</span>
+<span id="cb16-24"><a href="#cb16-24"></a>stop <span class="op">=</span> <span class="bu">max</span>(missing_dates)</span>
+<span id="cb16-25"><a href="#cb16-25"></a>missing_range <span class="op">=</span> <span class="bu">set</span>(pd.date_range(start,stop))</span>
+<span id="cb16-26"><a href="#cb16-26"></a><span class="cf">assert</span> missing_dates <span class="op">==</span> missing_range</span>
+<span id="cb16-27"><a href="#cb16-27"></a></span>
+<span id="cb16-28"><a href="#cb16-28"></a><span class="bu">print</span>(<span class="ss">f&quot;&quot;&quot;</span><span class="sc">{</span><span class="bu">len</span>(stores)<span class="sc">}</span><span class="ss"> stores are missing dates \</span></span>
+<span id="cb16-29"><a href="#cb16-29"></a><span class="ss">from </span><span class="sc">{</span>start<span class="sc">.</span>strftime(<span class="st">&quot;%Y-%m-</span><span class="sc">%d</span><span class="st">&quot;</span>)<span class="sc">}</span><span class="ss"> to </span><span class="sc">{</span>stop<span class="sc">.</span>strftime(<span class="st">&quot;%Y-%m-</span><span class="sc">%d</span><span class="st">&quot;</span>)<span class="sc">}</span><span class="ss">&quot;&quot;&quot;</span>)</span></code></pre></div>
+<pre><code>180 stores are missing dates from 2014-07-01 to 2014-12-31</code></pre>
+<p>These 180 stores include stores of all three <code>Assortment</code> and all four <code>StoreType</code> levels – there was no clear evidence in the data given of any systematic bias in those stores with missing data.</p>
+<div class="sourceCode" id="cb18"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb18-1"><a href="#cb18-1"></a>stores_missing_dates <span class="op">=</span> store_data.loc[store_data[<span class="st">&#39;Store&#39;</span>].isin(stores)]</span>
+<span id="cb18-2"><a href="#cb18-2"></a><span class="bu">print</span>(<span class="ss">f&quot;&quot;&quot;</span></span>
+<span id="cb18-3"><a href="#cb18-3"></a><span class="ss">Stores missing data from second half of 2014 </span></span>
+<span id="cb18-4"><a href="#cb18-4"></a><span class="ss">have `Assortment` values </span><span class="sc">{</span>stores_missing_dates[<span class="st">&#39;Assortment&#39;</span>]<span class="sc">.</span>unique()<span class="sc">}</span></span>
+<span id="cb18-5"><a href="#cb18-5"></a><span class="ss">and `StoreType` values </span><span class="sc">{</span>stores_missing_dates[<span class="st">&quot;StoreType&quot;</span>]<span class="sc">.</span>unique()<span class="sc">}</span></span>
+<span id="cb18-6"><a href="#cb18-6"></a><span class="ss"> &quot;&quot;&quot;</span>)</span></code></pre></div>
+<pre><code>
+Stores missing data from second half of 2014
+have `Assortment` values [&#39;a&#39; &#39;c&#39; &#39;b&#39;]
+and `StoreType` values [&#39;d&#39; &#39;a&#39; &#39;c&#39; &#39;b&#39;]</code></pre>
+<p>Although we might note that the data does not include geographic information, so a likely scenario would be that they could all be from the same region, and that region’s results were incorrectly merged with the others – in this case, the missing data is likely to cause some unavoidable systematic error. Whatever the reason, I decided to estimate the sales those stores would have had, if they had been open, and then use those estimates in training our final model.</p>
+<div class="sourceCode" id="cb20"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb20-1"><a href="#cb20-1"></a><span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">1</span>,n<span class="op">+</span><span class="dv">1</span>):</span>
+<span id="cb20-2"><a href="#cb20-2"></a>    <span class="cf">if</span> <span class="bu">len</span>(dates_for_store[i]) <span class="op">!=</span> <span class="bu">len</span>(training_data[<span class="st">&#39;Date&#39;</span>].unique()) <span class="op">\</span></span>
+<span id="cb20-3"><a href="#cb20-3"></a>    <span class="kw">and</span> i <span class="kw">not</span> <span class="kw">in</span> stores:</span>
+<span id="cb20-4"><a href="#cb20-4"></a>        another <span class="op">=</span> training_data.loc[training_data[<span class="st">&#39;Store&#39;</span>]<span class="op">==</span>i]</span>
+<span id="cb20-5"><a href="#cb20-5"></a>        missing <span class="op">=</span> all_dates.difference(<span class="bu">set</span>(pd.Series(another.Date.unique())))</span>
+<span id="cb20-6"><a href="#cb20-6"></a>        <span class="bu">print</span>(<span class="ss">f&#39;</span><span class="sc">{i}</span><span class="ss"> is missing </span><span class="sc">{</span>missing<span class="sc">}</span><span class="ss">&#39;</span>)</span></code></pre></div>
+<pre><code>988 is missing {Timestamp(&#39;2013-01-01 00:00:00&#39;)}</code></pre>
+<p>There is also another store – number <code>988</code> – that is missing some data: in this case just for the single date at the start of the range, 1st January 2013. One missing date out of 942 need not worry us.</p>
+<h3 id="integrating-data">Integrating Data</h3>
+<p>Having done an initial exploration of the datasets, we integrate them on the <code>Store</code> index number. In checking this was as expected – an unbroken integer sequence from 1 to 1,1115 – it became apparent that for some reason the <code>test.csv</code> dataset only includes data for 856 stores.</p>
+<div class="sourceCode" id="cb22"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb22-1"><a href="#cb22-1"></a><span class="co">## assert `Store` index is as expected -- </span></span>
+<span id="cb22-2"><a href="#cb22-2"></a><span class="co">## ie. an unbroken sequence of increasing integers starting at 1</span></span>
+<span id="cb22-3"><a href="#cb22-3"></a><span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">1</span>,<span class="bu">len</span>(store_data)<span class="op">+</span><span class="dv">1</span>):</span>
+<span id="cb22-4"><a href="#cb22-4"></a>    <span class="cf">assert</span>(i<span class="op">==</span>store_data.Store.iloc[i<span class="op">-</span><span class="dv">1</span>])</span>
+<span id="cb22-5"><a href="#cb22-5"></a><span class="co">## assert set of Stores in `store_data` is same as set of Stores in `training_data`</span></span>
+<span id="cb22-6"><a href="#cb22-6"></a><span class="cf">assert</span> <span class="bu">set</span>(store_data.Store) <span class="op">==</span> <span class="bu">set</span>(training_data.Store)</span>
+<span id="cb22-7"><a href="#cb22-7"></a><span class="co">## but not the same as the set of stores in `test_data`</span></span>
+<span id="cb22-8"><a href="#cb22-8"></a><span class="cf">assert</span> <span class="bu">set</span>(store_data.Store) <span class="op">!=</span> <span class="bu">set</span>(test_data.Store)</span>
+<span id="cb22-9"><a href="#cb22-9"></a><span class="bu">print</span>(<span class="ss">f&#39;`test_data` only has data for </span><span class="sc">{</span><span class="bu">len</span>(test_data.Store.unique())<span class="sc">}</span><span class="ss"> stores&#39;</span>)</span></code></pre></div>
+<pre><code>`test_data` only has data for 856 stores</code></pre>
+<p>The other two (<code>training.csv</code> and <code>store.csv</code>) are complete, so this missing data need not concern us in developing a predictive model.</p>
+<div class="sourceCode" id="cb24"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb24-1"><a href="#cb24-1"></a>integrated <span class="op">=</span> pd.merge(training_data,store_data,on<span class="op">=</span><span class="st">&#39;Store&#39;</span>)</span>
+<span id="cb24-2"><a href="#cb24-2"></a>integrated_test <span class="op">=</span> pd.merge(test_data,store_data,on<span class="op">=</span><span class="st">&#39;Store&#39;</span>)</span></code></pre></div>
+<h2 id="methodology">Methodology</h2>
+<h3 id="general-approach">General Approach</h3>
+<p>Having loaded, cleaned, and integrated our data, we are in a position to consider the business problem which we must address: predicting six weeks of daily sales data.</p>
+<p>We do this by iteratively developing a series of predictive linear regression models, on a sample of the <code>training_data</code> from the interval <span class="math inline">\([t_{0},t_{1}]\)</span>, and then validating the models on a <em>hold-out sample</em> <span class="citation" data-cites="FSchorfheideWolpin2012">(Schorfheide and Wolpin 2012)</span> from the interval <span class="math inline">\((t_{1},t_{2}]\)</span>.</p>
+<p>In general, given a store number <span class="math inline">\(i\)</span> and a date <span class="math inline">\(t\)</span>, we want to be able to know the sales value <span class="math inline">\(S(i,t)\)</span>. We suppose that <span class="math inline">\(S\)</span> is a combination of some predictable <span class="math inline">\(\hat{S}(i,t)\)</span> and some unpredictable noise <span class="math inline">\(\varepsilon\)</span>, and we want to optimize our prediction against some measure of error <span class="math inline">\(e\)</span>.</p>
+<p>Specifically, we will try to minimize the Root Mean Square Percentage Error (henceforth, the RMSPE). The RMSPE is preferable to the absolute Mean Square Percentage Error because it is calibrated to the result under consideration - an error of say 100 would be much less significant if it is for a predicted value of 10,000 (an error of 1%), than for a predicted value of 10 (an error of 1000%). But to my surprise, the usually excellent Python statistical library <code>statsmodels</code> included a <code>rmse()</code> Root Mean Squared Error function in its collection of evaluation measures, but not a Percentage Error. So I wrote the function and made a Pull Request for it to be added to the library <span class="citation" data-cites="Statsmodels2020">(Statsmodels 2020)</span>.</p>
+<div class="sourceCode" id="cb25"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb25-1"><a href="#cb25-1"></a><span class="kw">def</span> rmspe(y, y_hat, axis<span class="op">=</span><span class="dv">0</span>, zeros<span class="op">=</span>np.nan):</span>
+<span id="cb25-2"><a href="#cb25-2"></a>    <span class="co">&quot;&quot;&quot;</span></span>
+<span id="cb25-3"><a href="#cb25-3"></a><span class="co">    Root Mean Squared Percentage Error</span></span>
+<span id="cb25-4"><a href="#cb25-4"></a><span class="co">    &quot;&quot;&quot;</span></span>
+<span id="cb25-5"><a href="#cb25-5"></a>    y_hat <span class="op">=</span> np.asarray(y_hat)</span>
+<span id="cb25-6"><a href="#cb25-6"></a>    y <span class="op">=</span> np.asarray(y)</span>
+<span id="cb25-7"><a href="#cb25-7"></a>    error <span class="op">=</span> y <span class="op">-</span> y_hat</span>
+<span id="cb25-8"><a href="#cb25-8"></a>    percentage_error <span class="op">=</span> np.divide(error, y, out<span class="op">=</span>np.full_like(error,zeros), where<span class="op">=</span>y<span class="op">!=</span><span class="dv">0</span>)</span>
+<span id="cb25-9"><a href="#cb25-9"></a>    <span class="cf">return</span> np.nanmean(percentage_error<span class="op">**</span><span class="dv">2</span>, axis<span class="op">=</span>axis) <span class="op">*</span> <span class="dv">100</span></span></code></pre></div>
+<p>The only challenge is dealing with cases where the actual value is zero, in which case evaluating a percentage error means we might find ourselves dividing by zero. Fortunately, Python’s numerical array library <code>numpy</code> <span class="citation" data-cites="TOliphant2006">(Oliphant 2006)</span> allows us to specify explicitly and straightforwardly how to deal with specific cases.</p>
+<h3 id="the-minimal-model">The Minimal Model</h3>
+<p>We begin with a simple visualisation of all the million or so data points (Figure 2) of <code>Sales</code> over time (that is, the specific <code>Date</code>) – ignoring of course whatever points from when a store was not <code>Open</code>, since unsurprisingly the <code>Sales</code> value in all such cases is zero.</p>
+<div class="sourceCode" id="cb26"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb26-1"><a href="#cb26-1"></a>fig, ax <span class="op">=</span> plt.subplots(figsize<span class="op">=</span>(<span class="dv">15</span>,<span class="dv">10</span>))</span>
+<span id="cb26-2"><a href="#cb26-2"></a>opened <span class="op">=</span> integrated.loc[integrated.Open<span class="op">==</span><span class="dv">1</span>]</span>
+<span id="cb26-3"><a href="#cb26-3"></a>mean_sales_vector <span class="op">=</span> np.full(<span class="bu">len</span>(opened.Date), opened.Sales.mean())</span>
+<span id="cb26-4"><a href="#cb26-4"></a>all_dates <span class="op">=</span> pd.concat([opened.Date, test_data.Date])</span>
+<span id="cb26-5"><a href="#cb26-5"></a>extended_sales_vector <span class="op">=</span> np.full(<span class="bu">len</span>(all_dates), opened.Sales.mean())</span>
+<span id="cb26-6"><a href="#cb26-6"></a>ax.scatter(opened.Date, opened.Sales, alpha<span class="op">=</span><span class="fl">0.002</span>,c<span class="op">=</span><span class="st">&#39;b&#39;</span>,marker<span class="op">=</span><span class="st">&#39;.&#39;</span>,label<span class="op">=</span><span class="st">&#39;Sales&#39;</span>)</span>
+<span id="cb26-7"><a href="#cb26-7"></a>ax.plot(all_dates, extended_sales_vector,label<span class="op">=</span><span class="st">&#39;Mean Sales&#39;</span>,c<span class="op">=</span><span class="st">&#39;r&#39;</span>,ls<span class="op">=</span><span class="st">&#39;-.&#39;</span>)</span>
+<span id="cb26-8"><a href="#cb26-8"></a>ax.axvline(Timestamp(<span class="dv">2014</span>,<span class="dv">1</span>,<span class="dv">1</span>),c<span class="op">=</span><span class="st">&#39;grey&#39;</span>,ls<span class="op">=</span><span class="st">&#39;--&#39;</span>)</span>
+<span id="cb26-9"><a href="#cb26-9"></a>ax.axvline(Timestamp(<span class="dv">2015</span>,<span class="dv">1</span>,<span class="dv">1</span>),c<span class="op">=</span><span class="st">&#39;grey&#39;</span>,ls<span class="op">=</span><span class="st">&#39;--&#39;</span>)</span>
+<span id="cb26-10"><a href="#cb26-10"></a>ax.set_ylim(<span class="dv">0</span>,<span class="dv">20000</span>)</span>
+<span id="cb26-11"><a href="#cb26-11"></a>ax.set_xlim(Timestamp(<span class="dv">2013</span>,<span class="dv">1</span>,<span class="dv">1</span>),Timestamp(<span class="dv">2015</span>,<span class="dv">9</span>,<span class="dv">18</span>))</span>
+<span id="cb26-12"><a href="#cb26-12"></a>ax.set_ylabel(<span class="st">&#39;Sales&#39;</span>)</span>
+<span id="cb26-13"><a href="#cb26-13"></a>ax.set_xlabel(<span class="st">&#39;Date&#39;</span>)</span>
+<span id="cb26-14"><a href="#cb26-14"></a>leg <span class="op">=</span> ax.legend(loc<span class="op">=</span><span class="dv">1</span>)</span>
+<span id="cb26-15"><a href="#cb26-15"></a><span class="cf">for</span> lh <span class="kw">in</span> leg.legendHandles: </span>
+<span id="cb26-16"><a href="#cb26-16"></a>    lh.set_alpha(<span class="dv">1</span>)</span>
+<span id="cb26-17"><a href="#cb26-17"></a>ax.tick_params(axis<span class="op">=</span><span class="st">&#39;x&#39;</span>, rotation<span class="op">=</span><span class="dv">30</span>)</span>
+<span id="cb26-18"><a href="#cb26-18"></a>fig.suptitle(<span class="ss">f&#39;Two and a half years of Sales Data for </span><span class="sc">{</span><span class="bu">len</span>(store_data)<span class="sc">}</span><span class="ss"> Stores&#39;</span>,y<span class="op">=</span><span class="dv">0</span>)</span>
+<span id="cb26-19"><a href="#cb26-19"></a>fig.tight_layout()</span>
+<span id="cb26-20"><a href="#cb26-20"></a></span>
+<span id="cb26-21"><a href="#cb26-21"></a>plt.savefig(<span class="st">&#39;../figures/scatterdata.png&#39;</span>)</span></code></pre></div>
+<p><img src="../figures/draft_figure20_1.png" /><br />
+</p>
+<p>Although there is a large amount of vertical variation within the data, the line is strikingly horizontal over time. This immediately suggests a simplest model, in which we predict the <code>Sales</code> of any given store on any day to be the mean of all known <code>Sales</code>.</p>
+<p><span class="math display">\[\hat{S} = \mu_{\mathcal{S}}\]</span></p>
+<p>where <span class="math inline">\(\mathcal{S}\)</span> is the set of known <code>Sales</code> values, <span class="math inline">\(S_{it}\)</span> is the particular known <code>Sales</code> value for a given <code>Store</code> <span class="math inline">\(i\)</span> on a <code>Date</code> <span class="math inline">\(t\)</span>, and we write <span class="math inline">\(\mu_{\mathcal{S}}\)</span> for the mean of the set <span class="math inline">\(\mathcal{S}\)</span>, such that <span class="math display">\[\mu_{ \mathcal{S} } = \frac{1}{| \mathcal{S}|} \sum_{S_{it} \in \mathcal{S}} S_{it}\]</span></p>
+<p>Note that while I try to use the appropriate notation <span class="citation" data-cites="KAbadirMagnus2002">(Abadir and Magnus 2002)</span>, the mathematics is here intended primarily as an exposition of the code, which is pragmatically focussed on optimizing a validated error score, rather than establishing any rigorous causal claim against a null hypothesis.</p>
+<div class="sourceCode" id="cb27"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb27-1"><a href="#cb27-1"></a>opened <span class="op">=</span> integrated.loc[integrated.Open<span class="op">==</span><span class="dv">1</span>]</span>
+<span id="cb27-2"><a href="#cb27-2"></a>mean_sales_vector <span class="op">=</span> np.full(<span class="bu">len</span>(opened.Sales), opened.Sales.mean())</span>
+<span id="cb27-3"><a href="#cb27-3"></a><span class="bu">print</span>(<span class="ss">f&quot;&quot;&quot;RMSPE of mean sales values as predictor of `Sales`:</span></span>
+<span id="cb27-4"><a href="#cb27-4"></a><span class="sc">{</span>rmspe(opened.Sales, mean_sales_vector)<span class="sc">}</span><span class="ss">&quot;&quot;&quot;</span></span></code></pre></div>
+<pre><code>  File &quot;&lt;ipython-input-1-faca698920ba&gt;&quot;, line 4
+    {rmspe(opened.Sales, mean_sales_vector)}&quot;&quot;&quot;
+
+^
+SyntaxError: unexpected EOF while parsing</code></pre>
+<p>This gives us a RMSPE slightly over 40%.</p>
+<h3 id="personalized-models">Personalized Models</h3>
+<p>Of course, we need not blindly consider all stores aggregated together, when we have precise data for each individual store. This suggests a better model:</p>
+<p><span class="math display">\[\hat{S}(i) = \mu_{\mathcal{S}_{i}}\]</span></p>
+<p>where <span class="math inline">\(\mathcal{S}_{i} = \{ S_{it} : t \in [t_{0}, t_{1}] \} \subset \mathcal{S}\)</span>,</p>
+<div class="sourceCode" id="cb29"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb29-1"><a href="#cb29-1"></a>mean_mapper <span class="op">=</span> {}</span>
+<span id="cb29-2"><a href="#cb29-2"></a><span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">1</span>,<span class="dv">1115</span>):</span>
+<span id="cb29-3"><a href="#cb29-3"></a>    mean_mapper[i] <span class="op">=</span> opened.loc[opened.Store<span class="op">==</span>i].Sales.mean()</span>
+<span id="cb29-4"><a href="#cb29-4"></a>opened[<span class="st">&#39;IndividualMeans&#39;</span>] <span class="op">=</span> opened[<span class="st">&#39;Store&#39;</span>].<span class="bu">map</span>(mean_mapper)</span></code></pre></div>
+<div class="sourceCode" id="cb30"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb30-1"><a href="#cb30-1"></a><span class="bu">print</span>(<span class="ss">f&#39;RMSPE = </span><span class="sc">{</span>rmspe(opened.Sales, opened.IndividualMeans)<span class="sc">}</span><span class="ss">&#39;</span>)</span></code></pre></div>
+<pre><code>RMSPE = 15.503699843759986</code></pre>
+<p>Already we have a model which gives us a RMSPE of 15.4%.</p>
+<p>Properly speaking we should validate this score on a hold-out sample before too much congratulating ourselves – just because the overall aggregate mean of sales across all stores is stationary across time, there is no guarantee that the trend of any individual store will be so – in which case our model will do somewhat worse on unseen data. But we will factor time effects into our model before going to the trouble of validating over a different time period.</p>
+<h3 id="seasonality-and-trend">Seasonality and Trend</h3>
+<p>The other thing that is apparent from Figure 2 is a significant and repeated rise in sales just before the end of each year. This makes sense, in terms of extra shopping before the Christmas holidays. And it suggests that we pay closer attention to the performance of a particular Store not just in terms of its trend, but also in terms of its cyclic seasonal averages.</p>
+<p>I therefore implemented two simple functions to find naive versions of seasonality and trend independently for each store: ; <code>find_trend()</code> uses ordinary least squares regression to find a line of best fit between a store’s <code>Sales</code> and the <code>Date</code>’s <code>DayNumber</code> since the beginning of 2013; <code>get_averages()</code> finds the mean sales for every <code>Month</code> of the year, as well as for every <code>DayOfWeek</code>.</p>
+<p>Mathematically, we use OLS to fit</p>
+<p><span class="math display">\[ T_{i}(t) = \alpha_{i} + \beta_{i}t \approx S(i,t)\]</span></p>
+<p>and we find</p>
+<p><span class="math display">\[M_{i}(t) = M_{im} = \mu_{ \mathcal{S}_{im}}\]</span> for <span class="math inline">\(t \in m\)</span>, where <span class="math inline">\(m\)</span> is the set of dates falling within a particular month, <span class="math inline">\(\mathcal{S}_{im} = \{ S_{it} : t \in m \} \subset \mathcal{S}_{i}\)</span>, and <span class="math inline">\(M_{im} \in \mathbb{R}\)</span> is the monthly average for the store in question.</p>
+<div class="sourceCode" id="cb32"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb32-1"><a href="#cb32-1"></a><span class="kw">def</span> find_trend(df):</span>
+<span id="cb32-2"><a href="#cb32-2"></a>    <span class="co">&quot;Find line-of-best-fit for &#39;Sales ~ DayNumber&#39;&quot;</span></span>
+<span id="cb32-3"><a href="#cb32-3"></a>    </span>
+<span id="cb32-4"><a href="#cb32-4"></a>    dataset <span class="op">=</span> df</span>
+<span id="cb32-5"><a href="#cb32-5"></a>    <span class="co">## find `DayNumber` for each Date</span></span>
+<span id="cb32-6"><a href="#cb32-6"></a>    dataset[<span class="st">&#39;DayNumber&#39;</span>] <span class="op">=</span> dataset.Date.dt.dayofyear <span class="op">\</span></span>
+<span id="cb32-7"><a href="#cb32-7"></a>                    <span class="op">+</span> (dataset.Date.dt.year <span class="op">-</span> <span class="dv">2013</span>)<span class="op">*</span><span class="dv">365</span></span>
+<span id="cb32-8"><a href="#cb32-8"></a>    <span class="co">## only consider days when store is open</span></span>
+<span id="cb32-9"><a href="#cb32-9"></a>    dataset_open <span class="op">=</span> dataset.loc[dataset.Open<span class="op">==</span><span class="dv">1</span>]</span>
+<span id="cb32-10"><a href="#cb32-10"></a>    </span>
+<span id="cb32-11"><a href="#cb32-11"></a>    naive_trend <span class="op">=</span> {}</span>
+<span id="cb32-12"><a href="#cb32-12"></a>    dataset[<span class="st">&#39;NaiveTrend&#39;</span>] <span class="op">=</span> <span class="dv">0</span></span>
+<span id="cb32-13"><a href="#cb32-13"></a>    </span>
+<span id="cb32-14"><a href="#cb32-14"></a>    <span class="co">## iterate through Stores</span></span>
+<span id="cb32-15"><a href="#cb32-15"></a>    <span class="cf">for</span> i <span class="kw">in</span> dataset.Store.unique():</span>
+<span id="cb32-16"><a href="#cb32-16"></a>        naive_trend[i] <span class="op">=</span> ols(formula<span class="op">=</span><span class="st">&#39;Sales~DayNumber&#39;</span>, </span>
+<span id="cb32-17"><a href="#cb32-17"></a>                        data<span class="op">=</span>dataset_open.loc[dataset_open.Store<span class="op">==</span>i]).fit()</span>
+<span id="cb32-18"><a href="#cb32-18"></a>        dataset[<span class="st">&#39;NaiveTrend&#39;</span>] <span class="op">=</span> np.where(dataset.Store<span class="op">==</span>i,</span>
+<span id="cb32-19"><a href="#cb32-19"></a>                        dataset.DayNumber<span class="op">*</span>naive_trend[i].params[<span class="st">&#39;DayNumber&#39;</span>] <span class="op">\</span></span>
+<span id="cb32-20"><a href="#cb32-20"></a>                            <span class="op">+</span> naive_trend[i].params[<span class="st">&#39;Intercept&#39;</span>],</span>
+<span id="cb32-21"><a href="#cb32-21"></a>                        dataset[<span class="st">&#39;NaiveTrend&#39;</span>])</span>
+<span id="cb32-22"><a href="#cb32-22"></a>        </span>
+<span id="cb32-23"><a href="#cb32-23"></a>    </span>
+<span id="cb32-24"><a href="#cb32-24"></a>    <span class="cf">return</span> dataset, naive_trend</span></code></pre></div>
+<div class="sourceCode" id="cb33"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb33-1"><a href="#cb33-1"></a><span class="kw">def</span> get_averages(df):</span>
+<span id="cb33-2"><a href="#cb33-2"></a>    <span class="co">&quot;&quot;&quot;Get average Sales for various timeframes&quot;&quot;&quot;</span></span>
+<span id="cb33-3"><a href="#cb33-3"></a>    </span>
+<span id="cb33-4"><a href="#cb33-4"></a>    dataset <span class="op">=</span> df</span>
+<span id="cb33-5"><a href="#cb33-5"></a>    t <span class="op">=</span> dataset.NaiveTrend <span class="op">/</span> dataset.NaiveTrend.mean()</span>
+<span id="cb33-6"><a href="#cb33-6"></a>    dataset[<span class="st">&#39;Month&#39;</span>] <span class="op">=</span> dataset[<span class="st">&#39;Date&#39;</span>].dt.month</span>
+<span id="cb33-7"><a href="#cb33-7"></a>    mapper <span class="op">=</span> {}</span>
+<span id="cb33-8"><a href="#cb33-8"></a>    length <span class="op">=</span> [<span class="st">&#39;Month&#39;</span>,<span class="st">&#39;DayOfWeek&#39;</span>]</span>
+<span id="cb33-9"><a href="#cb33-9"></a>    df_list <span class="op">=</span> []</span>
+<span id="cb33-10"><a href="#cb33-10"></a>    df_store <span class="op">=</span> {}</span>
+<span id="cb33-11"><a href="#cb33-11"></a>    </span>
+<span id="cb33-12"><a href="#cb33-12"></a>    <span class="co">## iterate through Stores</span></span>
+<span id="cb33-13"><a href="#cb33-13"></a>    <span class="cf">for</span> store <span class="kw">in</span> dataset.Store.unique():</span>
+<span id="cb33-14"><a href="#cb33-14"></a>        df_store[store] <span class="op">=</span> dataset.loc[dataset.Store<span class="op">==</span>store]</span>
+<span id="cb33-15"><a href="#cb33-15"></a>        mapper[store] <span class="op">=</span> {}</span>
+<span id="cb33-16"><a href="#cb33-16"></a>        </span>
+<span id="cb33-17"><a href="#cb33-17"></a>        <span class="co">## iterate through list of time periods</span></span>
+<span id="cb33-18"><a href="#cb33-18"></a>        <span class="cf">for</span> l <span class="kw">in</span> length:</span>
+<span id="cb33-19"><a href="#cb33-19"></a>            df_store[store][<span class="ss">f&#39;AverageFor</span><span class="sc">{l}</span><span class="ss">&#39;</span>] <span class="op">=</span> <span class="dv">0</span></span>
+<span id="cb33-20"><a href="#cb33-20"></a>            mapper[store][l] <span class="op">=</span> {}</span>
+<span id="cb33-21"><a href="#cb33-21"></a>            </span>
+<span id="cb33-22"><a href="#cb33-22"></a>            <span class="co">## iterate over unique months/days of week</span></span>
+<span id="cb33-23"><a href="#cb33-23"></a>            <span class="cf">for</span> i <span class="kw">in</span> dataset[l].unique():</span>
+<span id="cb33-24"><a href="#cb33-24"></a>                <span class="co">## get mean Sales value</span></span>
+<span id="cb33-25"><a href="#cb33-25"></a>                mapper[store][l][i] <span class="op">=</span> df_store[store].loc[</span>
+<span id="cb33-26"><a href="#cb33-26"></a>                    df_store[store][l]<span class="op">==</span>i][<span class="st">&#39;Sales&#39;</span>].mean()</span>
+<span id="cb33-27"><a href="#cb33-27"></a>                df_store[store][<span class="ss">f&#39;AverageFor</span><span class="sc">{l}</span><span class="ss">&#39;</span>] <span class="op">=</span> np.where(</span>
+<span id="cb33-28"><a href="#cb33-28"></a>                    df_store[store][l]<span class="op">==</span>i,</span>
+<span id="cb33-29"><a href="#cb33-29"></a>                    df_store[store][l].<span class="bu">map</span>(mapper[store][l]),</span>
+<span id="cb33-30"><a href="#cb33-30"></a>                    df_store[store][<span class="ss">f&#39;AverageFor</span><span class="sc">{l}</span><span class="ss">&#39;</span>])</span>
+<span id="cb33-31"><a href="#cb33-31"></a>                </span>
+<span id="cb33-32"><a href="#cb33-32"></a>        D <span class="op">=</span> df_store[store].AverageForDayOfWeek <span class="op">\</span></span>
+<span id="cb33-33"><a href="#cb33-33"></a>                                    <span class="op">/</span> df_store[store].AverageForDayOfWeek.mean()</span>
+<span id="cb33-34"><a href="#cb33-34"></a>        T <span class="op">=</span> df_store[store].NaiveTrend <span class="op">/</span> df_store[store].NaiveTrend.mean()</span>
+<span id="cb33-35"><a href="#cb33-35"></a>        df_store[store][<span class="st">&#39;MTD&#39;</span>] <span class="op">=</span> df_store[store].AverageForMonth <span class="op">*</span> T <span class="op">*</span> D</span>
+<span id="cb33-36"><a href="#cb33-36"></a>        df_list.append(df_store[store])</span>
+<span id="cb33-37"><a href="#cb33-37"></a>        </span>
+<span id="cb33-38"><a href="#cb33-38"></a>    dataset <span class="op">=</span> pd.concat(df_list).sort_index()</span>
+<span id="cb33-39"><a href="#cb33-39"></a>    <span class="cf">return</span> dataset, mapper</span></code></pre></div>
+<p>As mentioned, 180 stores are missing data for the second half of 2014, so we begin by considering the eighteen months for which we have full data.</p>
+<div class="sourceCode" id="cb34"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb34-1"><a href="#cb34-1"></a></span>
+<span id="cb34-2"><a href="#cb34-2"></a>eighteen_months <span class="op">=</span> integrated.loc[integrated.Date <span class="op">&lt;=</span> Timestamp(<span class="dv">2014</span>,<span class="dv">6</span>,<span class="dv">30</span>)]</span>
+<span id="cb34-3"><a href="#cb34-3"></a>eighteen_months <span class="op">=</span> eighteen_months.loc[eighteen_months.Open<span class="op">==</span><span class="dv">1</span>]</span>
+<span id="cb34-4"><a href="#cb34-4"></a>eighteen_months, _ <span class="op">=</span> find_trend(eighteen_months)</span>
+<span id="cb34-5"><a href="#cb34-5"></a>eighteen_months, _ <span class="op">=</span> get_averages(eighteen_months)</span>
+<span id="cb34-6"><a href="#cb34-6"></a></span>
+<span id="cb34-7"><a href="#cb34-7"></a>fig, axs <span class="op">=</span> plt.subplots(<span class="dv">2</span>,<span class="dv">2</span>,figsize<span class="op">=</span>(<span class="dv">15</span>,<span class="dv">20</span>))</span>
+<span id="cb34-8"><a href="#cb34-8"></a>eg_stores <span class="op">=</span> [<span class="dv">302</span>, <span class="dv">470</span>, <span class="dv">756</span>, <span class="dv">882</span>]</span>
+<span id="cb34-9"><a href="#cb34-9"></a><span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">4</span>):</span>
+<span id="cb34-10"><a href="#cb34-10"></a>    j <span class="op">=</span> i<span class="op">//</span><span class="dv">2</span></span>
+<span id="cb34-11"><a href="#cb34-11"></a>    k <span class="op">=</span> i<span class="op">%</span><span class="dv">2</span></span>
+<span id="cb34-12"><a href="#cb34-12"></a>    ax <span class="op">=</span> axs[j][k]</span>
+<span id="cb34-13"><a href="#cb34-13"></a>    eg_store <span class="op">=</span> eg_stores[i]</span>
+<span id="cb34-14"><a href="#cb34-14"></a>    eg <span class="op">=</span> eighteen_months.loc[eighteen_months.Store <span class="op">==</span> eg_store].sort_index()</span>
+<span id="cb34-15"><a href="#cb34-15"></a>    t <span class="op">=</span> eg.NaiveTrend<span class="op">/</span>eg.NaiveTrend.mean()</span>
+<span id="cb34-16"><a href="#cb34-16"></a>    ax.plot(eg.Date,eg.NaiveTrend,c<span class="op">=</span><span class="st">&#39;k&#39;</span>,label<span class="op">=</span><span class="st">&#39;NaiveTrend ~ T&#39;</span>,ls<span class="op">=</span><span class="st">&#39;:&#39;</span>)</span>
+<span id="cb34-17"><a href="#cb34-17"></a>    ax.plot(eg.Date,eg.AverageForMonth<span class="op">*</span>t,label<span class="op">=</span><span class="st">&#39;AverageForMonth * T&#39;</span>,c<span class="op">=</span><span class="st">&#39;b&#39;</span>,ls<span class="op">=</span><span class="st">&#39;--&#39;</span>)</span>
+<span id="cb34-18"><a href="#cb34-18"></a>    ax.axvline(Timestamp(<span class="dv">2014</span>,<span class="dv">1</span>,<span class="dv">1</span>),c<span class="op">=</span><span class="st">&#39;grey&#39;</span>,ls<span class="op">=</span><span class="st">&#39;--&#39;</span>)</span>
+<span id="cb34-19"><a href="#cb34-19"></a>    ax.scatter(eg.Date, eg.Sales, alpha<span class="op">=</span><span class="fl">0.3</span>, c<span class="op">=</span><span class="st">&#39;g&#39;</span>, label<span class="op">=</span><span class="st">&#39;Sales&#39;</span>)</span>
+<span id="cb34-20"><a href="#cb34-20"></a>    ax.set_ylim(<span class="dv">0</span>,<span class="dv">25000</span>)</span>
+<span id="cb34-21"><a href="#cb34-21"></a>    ax.set_ylabel(<span class="st">&#39;Sales&#39;</span>)</span>
+<span id="cb34-22"><a href="#cb34-22"></a>    ax.set_xlim(Timestamp(<span class="dv">2013</span>,<span class="dv">1</span>,<span class="dv">1</span>),Timestamp(<span class="dv">2014</span>,<span class="dv">6</span>,<span class="dv">30</span>))</span>
+<span id="cb34-23"><a href="#cb34-23"></a>    ax.set_xlabel(<span class="st">&#39;Date&#39;</span>)</span>
+<span id="cb34-24"><a href="#cb34-24"></a><span class="co">## https://stackoverflow.com/questions/12848808/set-legend-symbol-opacity-with-matplotlib</span></span>
+<span id="cb34-25"><a href="#cb34-25"></a>    leg <span class="op">=</span> ax.legend()</span>
+<span id="cb34-26"><a href="#cb34-26"></a>    <span class="cf">for</span> lh <span class="kw">in</span> leg.legendHandles: </span>
+<span id="cb34-27"><a href="#cb34-27"></a>        lh.set_alpha(<span class="fl">0.5</span>)</span>
+<span id="cb34-28"><a href="#cb34-28"></a>    ax.set_title(<span class="ss">f&#39;Store </span><span class="sc">{</span>eg_store<span class="sc">}</span><span class="ss">&#39;</span>)</span>
+<span id="cb34-29"><a href="#cb34-29"></a>    ax.tick_params(axis<span class="op">=</span><span class="st">&#39;x&#39;</span>, rotation<span class="op">=</span><span class="dv">30</span>)</span>
+<span id="cb34-30"><a href="#cb34-30"></a>    </span>
+<span id="cb34-31"><a href="#cb34-31"></a>fig.tight_layout()</span>
+<span id="cb34-32"><a href="#cb34-32"></a>plt.savefig(<span class="st">&#39;../figures/trend_seasonality.png&#39;</span>)</span></code></pre></div>
+<p><img src="../figures/draft_figure26_1.png" /><br />
+</p>
+<p>In Figure 3 we see eighteen months of sales visualized for four different stores, as well as a grey dotted line showing the linear trend of those sales, and a blue dashed line showing the shifting seasonal monthly average of sales for those eighteen months. Actually, what is shown is not the average itself, but the product of the monthly average <span class="math inline">\(M_{im}\)</span> of sales for a store <span class="math inline">\(i\)</span> in a month <span class="math inline">\(m\)</span> with the normalized trend given by <span class="math inline">\(\bar{T_{i}}(t) = \frac{T_{i}(t)}{\mu_{\mathcal{T}_{i}}}\)</span>.</p>
+<p>Thus our model could be something like <span class="math display">\[\hat{S}(i,t) = M_{it}\bar{T_{i}}(t)\]</span></p>
+<p>We see this gives quite a good fit, and that our suspicion was justified that we could not rely on the trend of any particular store to be flat. But before we train and validate a model in these terms, we also visualize the effect of considering the effect of the average of sales for a store on a particular day of the week, <span class="math display">\[D_{i}(t) = \mu_{\mathcal{S}_{id}}\]</span> where <span class="math inline">\(t \in d\)</span>, the set of all dates falling on some particular day of the week.</p>
+<div class="sourceCode" id="cb35"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb35-1"><a href="#cb35-1"></a></span>
+<span id="cb35-2"><a href="#cb35-2"></a>fig, axs <span class="op">=</span> plt.subplots(<span class="dv">4</span>,<span class="dv">2</span>,figsize<span class="op">=</span>(<span class="dv">15</span>,<span class="dv">20</span>))</span>
+<span id="cb35-3"><a href="#cb35-3"></a>days <span class="op">=</span> calendar.day_name</span>
+<span id="cb35-4"><a href="#cb35-4"></a>eg_store <span class="op">=</span> <span class="dv">274</span> <span class="co">#np.random.randint(1,n+1)</span></span>
+<span id="cb35-5"><a href="#cb35-5"></a>eg <span class="op">=</span> eighteen_months.loc[eighteen_months.Store <span class="op">==</span> eg_store].sort_index()</span>
+<span id="cb35-6"><a href="#cb35-6"></a><span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">0</span>,<span class="dv">8</span>):</span>
+<span id="cb35-7"><a href="#cb35-7"></a>    j <span class="op">=</span> i<span class="op">//</span><span class="dv">2</span></span>
+<span id="cb35-8"><a href="#cb35-8"></a>    k <span class="op">=</span> i<span class="op">%</span><span class="dv">2</span></span>
+<span id="cb35-9"><a href="#cb35-9"></a>    ax <span class="op">=</span> axs[j][k]</span>
+<span id="cb35-10"><a href="#cb35-10"></a>    <span class="cf">if</span> i <span class="op">==</span> <span class="dv">0</span>:</span>
+<span id="cb35-11"><a href="#cb35-11"></a>        df <span class="op">=</span> eg</span>
+<span id="cb35-12"><a href="#cb35-12"></a>    <span class="cf">else</span>:</span>
+<span id="cb35-13"><a href="#cb35-13"></a>        df <span class="op">=</span> eg.loc[eg.DayOfWeek <span class="op">==</span> i]</span>
+<span id="cb35-14"><a href="#cb35-14"></a>    t <span class="op">=</span> df.NaiveTrend<span class="op">/</span>eg.NaiveTrend.mean()</span>
+<span id="cb35-15"><a href="#cb35-15"></a>    d <span class="op">=</span> df.AverageForDayOfWeek<span class="op">/</span>eg.AverageForDayOfWeek.mean()</span>
+<span id="cb35-16"><a href="#cb35-16"></a>    ax.scatter(df.Date, df.Sales, alpha<span class="op">=</span><span class="fl">0.3</span>, c<span class="op">=</span><span class="st">&#39;red&#39;</span>, label<span class="op">=</span><span class="st">&#39;Sales&#39;</span>)</span>
+<span id="cb35-17"><a href="#cb35-17"></a>    ax.axvline(Timestamp(<span class="dv">2014</span>,<span class="dv">1</span>,<span class="dv">1</span>),c<span class="op">=</span><span class="st">&#39;grey&#39;</span>,ls<span class="op">=</span><span class="st">&#39;--&#39;</span>)</span>
+<span id="cb35-18"><a href="#cb35-18"></a>    <span class="cf">if</span> i <span class="op">==</span> <span class="dv">0</span>:</span>
+<span id="cb35-19"><a href="#cb35-19"></a>        ax.plot(df.Date,df.AverageForMonth,label<span class="op">=</span><span class="st">&#39;AverageForMonth = M&#39;</span>,c<span class="op">=</span><span class="st">&#39;purple&#39;</span>,ls<span class="op">=</span><span class="st">&#39;-&#39;</span>)</span>
+<span id="cb35-20"><a href="#cb35-20"></a>        ax.plot(df.Date,df.NaiveTrend,label<span class="op">=</span><span class="st">&#39;NaiveTrend ~ T&#39;</span>, c<span class="op">=</span><span class="st">&#39;k&#39;</span>,ls<span class="op">=</span><span class="st">&#39;--&#39;</span>)</span>
+<span id="cb35-21"><a href="#cb35-21"></a>        ax.plot(df.Date,</span>
+<span id="cb35-22"><a href="#cb35-22"></a>                   df.AverageForDayOfWeek,</span>
+<span id="cb35-23"><a href="#cb35-23"></a>                   label<span class="op">=</span><span class="st">&#39;AverageForDayOfWeek ~ D&#39;</span>,</span>
+<span id="cb35-24"><a href="#cb35-24"></a>                   c<span class="op">=</span><span class="st">&#39;brown&#39;</span>,</span>
+<span id="cb35-25"><a href="#cb35-25"></a>                   ls<span class="op">=</span><span class="st">&#39;:&#39;</span>,</span>
+<span id="cb35-26"><a href="#cb35-26"></a>                   marker<span class="op">=</span><span class="st">&#39;.&#39;</span>,</span>
+<span id="cb35-27"><a href="#cb35-27"></a>                   alpha<span class="op">=</span><span class="fl">0.4</span>)</span>
+<span id="cb35-28"><a href="#cb35-28"></a>    <span class="cf">else</span>:</span>
+<span id="cb35-29"><a href="#cb35-29"></a>        ax.plot(df.Date,df.AverageForMonth<span class="op">*</span>t,label<span class="op">=</span><span class="st">&#39;M * T&#39;</span>,c<span class="op">=</span><span class="st">&#39;purple&#39;</span>,ls<span class="op">=</span><span class="st">&#39;:&#39;</span>)</span>
+<span id="cb35-30"><a href="#cb35-30"></a>        ax.plot(df.Date,df.AverageForMonth<span class="op">*</span>t<span class="op">*</span>d,label<span class="op">=</span><span class="st">&#39;M * T * D&#39;</span>,c<span class="op">=</span><span class="st">&#39;red&#39;</span>,ls<span class="op">=</span><span class="st">&#39;-.&#39;</span>)</span>
+<span id="cb35-31"><a href="#cb35-31"></a>    ax.set_ylim(<span class="dv">0</span>,<span class="dv">10000</span>)</span>
+<span id="cb35-32"><a href="#cb35-32"></a>    ax.set_ylabel(<span class="st">&#39;Sales&#39;</span>)</span>
+<span id="cb35-33"><a href="#cb35-33"></a>    ax.set_xlim(Timestamp(<span class="dv">2013</span>,<span class="dv">1</span>,<span class="dv">1</span>),Timestamp(<span class="dv">2014</span>,<span class="dv">6</span>,<span class="dv">30</span>))</span>
+<span id="cb35-34"><a href="#cb35-34"></a>    ax.set_xlabel(<span class="st">&#39;Date&#39;</span>)</span>
+<span id="cb35-35"><a href="#cb35-35"></a><span class="co">## https://stackoverflow.com/questions/12848808/set-legend-symbol-opacity-with-matplotlib</span></span>
+<span id="cb35-36"><a href="#cb35-36"></a>    leg <span class="op">=</span> ax.legend()</span>
+<span id="cb35-37"><a href="#cb35-37"></a>    <span class="cf">for</span> lh <span class="kw">in</span> leg.legendHandles: </span>
+<span id="cb35-38"><a href="#cb35-38"></a>        lh.set_alpha(<span class="dv">1</span>)</span>
+<span id="cb35-39"><a href="#cb35-39"></a>    <span class="cf">if</span> i<span class="op">&gt;</span><span class="dv">0</span>:</span>
+<span id="cb35-40"><a href="#cb35-40"></a>        ax.set_title(<span class="ss">f&#39;</span><span class="sc">{</span>days[i<span class="op">-</span><span class="dv">1</span>]<span class="sc">}</span><span class="ss">&#39;</span>)</span>
+<span id="cb35-41"><a href="#cb35-41"></a>    <span class="cf">else</span>:</span>
+<span id="cb35-42"><a href="#cb35-42"></a>        ax.set_title(<span class="st">&#39;All Days of the Week&#39;</span>)</span>
+<span id="cb35-43"><a href="#cb35-43"></a>    ax.tick_params(axis<span class="op">=</span><span class="st">&#39;x&#39;</span>, rotation<span class="op">=</span><span class="dv">30</span>)</span>
+<span id="cb35-44"><a href="#cb35-44"></a>    </span>
+<span id="cb35-45"><a href="#cb35-45"></a>fig.suptitle(<span class="ss">f&#39;Sales by Day of Week for Store </span><span class="sc">{</span>eg_store<span class="sc">}</span><span class="ss">&#39;</span>,y<span class="op">=</span><span class="fl">0.01</span>)</span>
+<span id="cb35-46"><a href="#cb35-46"></a>fig.tight_layout()</span>
+<span id="cb35-47"><a href="#cb35-47"></a></span>
+<span id="cb35-48"><a href="#cb35-48"></a>plt.savefig(<span class="st">&#39;../figures/daysofweek.png&#39;</span>)</span></code></pre></div>
+<p><img src="../figures/draft_figure27_1.png" /><br />
+</p>
+<p>Again, we use the normalized version <span class="math inline">\(\bar{D_{i}} = \frac{D_{i}}{\mu_{\mathcal{D}_{i}}}\)</span>, and then consider the product of daily and monthly cyclic patterns with the ongoing trend, which because of its curves we will here call</p>
+<p><span class="math display">\[\zeta(i,t) = M_{it}\bar{T_{i}}\bar{D_{i}}\]</span></p>
+<p>(In the code we simply add an extra feature to the dataframe named <code>MTD</code>).</p>
+<p>It is clear from Figure 4 that also considering <span class="math inline">\(\bar{D_{i}}\)</span> improves the fit of our model – at least in the case <span class="math inline">\(i = 274\)</span>.</p>
+<h3 id="reproducible-code-for-computing-the-optimal-model">Reproducible Code for Computing the Optimal Model</h3>
+<p>Thus far we have offered a visual suggestion that <span class="math inline">\(\hat{S} = \zeta\)</span> could be a good model, but nothing that could give any indication whether it might be an <em>optimal</em> model. To efficiently and persuasively compare and combine <span class="math inline">\(\zeta(i,t)\)</span> with the various <span class="math inline">\(\delta_{F}(i,t) \mapsto \{ 0 , 1 \}\)</span> (where <span class="math inline">\(\delta_{F}\)</span> is the binary mapping of a feature <span class="math inline">\(F\)</span> like <code>Promo</code> or <code>PublicHoliday</code>), we use the <code>Exhaustive Feature Selector</code> (imported as <code>EFS</code>) from the <code>mlxtend</code> library <span class="citation" data-cites="SRaschka2018">(Raschka 2018)</span> to suggest the best predictive models with 1, 2, and 3 (or indeed, however many we like) features.</p>
+<p><code>EFS</code> performs a brute-force evaluation of all feature subsets, selecting the one which scores best again the given error metric (in our case, RMSPE).</p>
+<div class="sourceCode" id="cb36"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb36-1"><a href="#cb36-1"></a><span class="kw">def</span> suggest_best_predictors(fully_processed, max_features):</span>
+<span id="cb36-2"><a href="#cb36-2"></a>    <span class="co">&quot;&quot;&quot;</span></span>
+<span id="cb36-3"><a href="#cb36-3"></a><span class="co">    Use Exhaustive Feature Selection </span></span>
+<span id="cb36-4"><a href="#cb36-4"></a><span class="co">    to suggest best linear predictors </span></span>
+<span id="cb36-5"><a href="#cb36-5"></a><span class="co">    for our fully processed dataset</span></span>
+<span id="cb36-6"><a href="#cb36-6"></a><span class="co">    &quot;&quot;&quot;</span></span>
+<span id="cb36-7"><a href="#cb36-7"></a>    max_features <span class="op">=</span> max_features</span>
+<span id="cb36-8"><a href="#cb36-8"></a>    efs, best <span class="op">=</span> {}, {}</span>
+<span id="cb36-9"><a href="#cb36-9"></a>    best[<span class="st">&#39;data&#39;</span>] <span class="op">=</span> fully_processed</span>
+<span id="cb36-10"><a href="#cb36-10"></a>    lr <span class="op">=</span> LinearRegression()</span>
+<span id="cb36-11"><a href="#cb36-11"></a>    rmspe_scorer <span class="op">=</span> make_scorer(rmspe, greater_is_better<span class="op">=</span><span class="va">False</span>)</span>
+<span id="cb36-12"><a href="#cb36-12"></a>    <span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">1</span>, max_features<span class="op">+</span><span class="dv">1</span>):</span>
+<span id="cb36-13"><a href="#cb36-13"></a>        efs[i] <span class="op">=</span> EFS(lr,</span>
+<span id="cb36-14"><a href="#cb36-14"></a>              min_features<span class="op">=</span>i,</span>
+<span id="cb36-15"><a href="#cb36-15"></a>              max_features<span class="op">=</span>i,</span>
+<span id="cb36-16"><a href="#cb36-16"></a>              scoring<span class="op">=</span>rmspe_scorer, </span>
+<span id="cb36-17"><a href="#cb36-17"></a>              print_progress<span class="op">=</span><span class="va">False</span>,</span>
+<span id="cb36-18"><a href="#cb36-18"></a>              cv<span class="op">=</span><span class="dv">0</span></span>
+<span id="cb36-19"><a href="#cb36-19"></a>              )</span>
+<span id="cb36-20"><a href="#cb36-20"></a>        efs[i].fit(fully_processed.drop(columns<span class="op">=</span>[<span class="st">&#39;Sales&#39;</span>]), </span>
+<span id="cb36-21"><a href="#cb36-21"></a>                   fully_processed[<span class="st">&#39;Sales&#39;</span>], </span>
+<span id="cb36-22"><a href="#cb36-22"></a>                   custom_feature_names<span class="op">=</span>fully_processed.drop(</span>
+<span id="cb36-23"><a href="#cb36-23"></a>                       columns<span class="op">=</span>[<span class="st">&#39;Sales&#39;</span>]).columns)</span>
+<span id="cb36-24"><a href="#cb36-24"></a>        best[i] <span class="op">=</span> efs[i].best_feature_names_</span>
+<span id="cb36-25"><a href="#cb36-25"></a>        </span>
+<span id="cb36-26"><a href="#cb36-26"></a>    keys <span class="op">=</span> <span class="bu">list</span>(best.keys())</span>
+<span id="cb36-27"><a href="#cb36-27"></a>    keys.remove(<span class="st">&#39;data&#39;</span>)</span>
+<span id="cb36-28"><a href="#cb36-28"></a>    best[<span class="st">&#39;max&#39;</span>] <span class="op">=</span> <span class="bu">max</span>(keys)    </span>
+<span id="cb36-29"><a href="#cb36-29"></a>    <span class="cf">return</span> best</span></code></pre></div>
+<div class="sourceCode" id="cb37"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb37-1"><a href="#cb37-1"></a><span class="kw">def</span> fit_models(best_predictors):</span>
+<span id="cb37-2"><a href="#cb37-2"></a>    <span class="co">&quot;&quot;&quot;</span></span>
+<span id="cb37-3"><a href="#cb37-3"></a><span class="co">    Fit linear models and return results for given predictors.</span></span>
+<span id="cb37-4"><a href="#cb37-4"></a><span class="co">    &quot;&quot;&quot;</span></span>
+<span id="cb37-5"><a href="#cb37-5"></a>    fully_processed <span class="op">=</span> best_predictors[<span class="st">&#39;data&#39;</span>]</span>
+<span id="cb37-6"><a href="#cb37-6"></a>    </span>
+<span id="cb37-7"><a href="#cb37-7"></a>    max_features <span class="op">=</span> best_predictors[<span class="st">&#39;max&#39;</span>]</span>
+<span id="cb37-8"><a href="#cb37-8"></a>    </span>
+<span id="cb37-9"><a href="#cb37-9"></a>    formula, lm, results, coefs, RMSPE, mapper, models <span class="op">=</span> {}, {}, {}, {}, {}, {}, {}</span>
+<span id="cb37-10"><a href="#cb37-10"></a></span>
+<span id="cb37-11"><a href="#cb37-11"></a>    <span class="cf">for</span> j <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">1</span>, max_features<span class="op">+</span><span class="dv">1</span>):</span>
+<span id="cb37-12"><a href="#cb37-12"></a>        <span class="bu">sum</span> <span class="op">=</span> <span class="st">&#39;&#39;</span></span>
+<span id="cb37-13"><a href="#cb37-13"></a>        <span class="cf">for</span> k, predictor <span class="kw">in</span> <span class="bu">enumerate</span>(best_predictors[j]):</span>
+<span id="cb37-14"><a href="#cb37-14"></a>            <span class="cf">if</span> k <span class="op">==</span> <span class="dv">0</span>:</span>
+<span id="cb37-15"><a href="#cb37-15"></a>                <span class="bu">sum</span> <span class="op">=</span> <span class="ss">f&#39;Q(&quot;</span><span class="sc">{</span>predictor<span class="sc">}</span><span class="ss">&quot;)&#39;</span></span>
+<span id="cb37-16"><a href="#cb37-16"></a>            <span class="cf">else</span>:</span>
+<span id="cb37-17"><a href="#cb37-17"></a>                <span class="bu">sum</span> <span class="op">=</span> <span class="ss">f&#39;</span><span class="sc">{</span><span class="bu">sum</span><span class="sc">}</span><span class="ss"> + Q(&quot;</span><span class="sc">{</span>predictor<span class="sc">}</span><span class="ss">&quot;)&#39;</span></span>
+<span id="cb37-18"><a href="#cb37-18"></a></span>
+<span id="cb37-19"><a href="#cb37-19"></a>        formula[j] <span class="op">=</span> <span class="ss">f&#39;Q(&quot;Sales&quot;) ~ </span><span class="sc">{</span><span class="bu">sum</span><span class="sc">}</span><span class="ss"> &#39;</span></span>
+<span id="cb37-20"><a href="#cb37-20"></a></span>
+<span id="cb37-21"><a href="#cb37-21"></a>    <span class="cf">for</span> j <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">1</span>, max_features<span class="op">+</span><span class="dv">1</span>):</span>
+<span id="cb37-22"><a href="#cb37-22"></a></span>
+<span id="cb37-23"><a href="#cb37-23"></a>        lm[j] <span class="op">=</span> ols(formula[j], fully_processed).fit()</span>
+<span id="cb37-24"><a href="#cb37-24"></a>        coefs[j] <span class="op">=</span> lm[j].params</span>
+<span id="cb37-25"><a href="#cb37-25"></a>        RMSPE[j] <span class="op">=</span> rmspe(fully_processed.Sales, lm[j].predict())</span>
+<span id="cb37-26"><a href="#cb37-26"></a>        </span>
+<span id="cb37-27"><a href="#cb37-27"></a>    results <span class="op">=</span> pd.DataFrame(coefs)</span>
+<span id="cb37-28"><a href="#cb37-28"></a></span>
+<span id="cb37-29"><a href="#cb37-29"></a>    <span class="cf">for</span> j <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">1</span>, max_features<span class="op">+</span><span class="dv">1</span>):</span>
+<span id="cb37-30"><a href="#cb37-30"></a>        coefs[j] <span class="op">=</span> lm[j].params</span>
+<span id="cb37-31"><a href="#cb37-31"></a>    results <span class="op">=</span> pd.DataFrame(coefs).transpose()</span>
+<span id="cb37-32"><a href="#cb37-32"></a>    results[<span class="st">&#39;RMSPE&#39;</span>] <span class="op">=</span> pd.Series(RMSPE, </span>
+<span id="cb37-33"><a href="#cb37-33"></a>                                 index<span class="op">=</span><span class="bu">list</span>(<span class="bu">range</span>(<span class="dv">1</span>,max_features<span class="op">+</span><span class="dv">1</span>)), </span>
+<span id="cb37-34"><a href="#cb37-34"></a>                                 name<span class="op">=</span><span class="st">&#39;RMSPE&#39;</span>)</span>
+<span id="cb37-35"><a href="#cb37-35"></a>    results.index.name <span class="op">=</span> <span class="st">&quot;Features&quot;</span></span>
+<span id="cb37-36"><a href="#cb37-36"></a>    </span>
+<span id="cb37-37"><a href="#cb37-37"></a>    <span class="cf">for</span> col <span class="kw">in</span> <span class="bu">list</span>(results.columns):</span>
+<span id="cb37-38"><a href="#cb37-38"></a>        <span class="cf">if</span> col[<span class="dv">0</span>]<span class="op">==</span><span class="st">&#39;Q&#39;</span>:</span>
+<span id="cb37-39"><a href="#cb37-39"></a>            mapper[col] <span class="op">=</span> col[<span class="dv">3</span>:<span class="op">-</span><span class="dv">2</span>]</span>
+<span id="cb37-40"><a href="#cb37-40"></a>    results.rename(columns<span class="op">=</span>mapper,inplace<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb37-41"><a href="#cb37-41"></a></span>
+<span id="cb37-42"><a href="#cb37-42"></a>    <span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(<span class="bu">len</span>(results)):</span>
+<span id="cb37-43"><a href="#cb37-43"></a>        models[i<span class="op">+</span><span class="dv">1</span>] <span class="op">=</span> <span class="bu">dict</span>(results.iloc[i])</span>
+<span id="cb37-44"><a href="#cb37-44"></a>        models[i<span class="op">+</span><span class="dv">1</span>].pop(<span class="st">&#39;RMSPE&#39;</span>)</span>
+<span id="cb37-45"><a href="#cb37-45"></a>        nan_keys <span class="op">=</span> []</span>
+<span id="cb37-46"><a href="#cb37-46"></a>        <span class="cf">for</span> key <span class="kw">in</span> models[i<span class="op">+</span><span class="dv">1</span>].keys():</span>
+<span id="cb37-47"><a href="#cb37-47"></a>            <span class="cf">if</span> <span class="bu">str</span>(models[i<span class="op">+</span><span class="dv">1</span>][key]) <span class="op">==</span> <span class="st">&#39;nan&#39;</span>:</span>
+<span id="cb37-48"><a href="#cb37-48"></a>                nan_keys.append(key)</span>
+<span id="cb37-49"><a href="#cb37-49"></a>        <span class="cf">for</span> key <span class="kw">in</span> nan_keys:</span>
+<span id="cb37-50"><a href="#cb37-50"></a>            models[i<span class="op">+</span><span class="dv">1</span>].pop(key)</span>
+<span id="cb37-51"><a href="#cb37-51"></a>    </span>
+<span id="cb37-52"><a href="#cb37-52"></a>    <span class="cf">return</span> models, results</span></code></pre></div>
+<p>First though we need to preprocess our training sample: exclude dates where stores are closed, create dummy variables, and drop unnecessary columns.</p>
+<div class="sourceCode" id="cb38"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb38-1"><a href="#cb38-1"></a><span class="kw">def</span> only_open(df):</span>
+<span id="cb38-2"><a href="#cb38-2"></a>    <span class="co">&quot;&quot;&quot;Only consider data from when store is open&quot;&quot;&quot;</span></span>
+<span id="cb38-3"><a href="#cb38-3"></a>    <span class="cf">return</span> df.loc[df.Open<span class="op">==</span><span class="dv">1</span>]</span></code></pre></div>
+<div class="sourceCode" id="cb39"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb39-1"><a href="#cb39-1"></a><span class="kw">def</span> create_dummies(df):</span>
+<span id="cb39-2"><a href="#cb39-2"></a>    <span class="co">&quot;&quot;&quot;Create dummy variables&quot;&quot;&quot;</span></span>
+<span id="cb39-3"><a href="#cb39-3"></a>    </span>
+<span id="cb39-4"><a href="#cb39-4"></a>    dataset <span class="op">=</span> df</span>
+<span id="cb39-5"><a href="#cb39-5"></a>    dataset[<span class="st">&#39;PublicHoliday&#39;</span>] <span class="op">=</span> np.where(dataset.StateHoliday <span class="op">==</span> <span class="st">&#39;a&#39;</span>, <span class="dv">1</span>, <span class="dv">0</span>)</span>
+<span id="cb39-6"><a href="#cb39-6"></a>    dataset[<span class="st">&#39;EasterHoliday&#39;</span>] <span class="op">=</span> np.where(dataset.StateHoliday <span class="op">==</span> <span class="st">&#39;b&#39;</span>, <span class="dv">1</span>, <span class="dv">0</span>)</span>
+<span id="cb39-7"><a href="#cb39-7"></a>    dataset[<span class="st">&#39;ChristmasHoliday&#39;</span>] <span class="op">=</span> np.where(dataset.StateHoliday <span class="op">==</span> <span class="st">&#39;c&#39;</span>, <span class="dv">1</span>, <span class="dv">0</span>)</span>
+<span id="cb39-8"><a href="#cb39-8"></a></span>
+<span id="cb39-9"><a href="#cb39-9"></a>    <span class="cf">for</span> x <span class="kw">in</span> dataset.StoreType.unique():</span>
+<span id="cb39-10"><a href="#cb39-10"></a>        dataset[<span class="ss">f&#39;Type</span><span class="sc">{x.</span>capitalize()<span class="sc">}</span><span class="ss">&#39;</span>] <span class="op">=</span> np.where(dataset.StoreType <span class="op">==</span> x, <span class="dv">1</span>, <span class="dv">0</span>)</span>
+<span id="cb39-11"><a href="#cb39-11"></a></span>
+<span id="cb39-12"><a href="#cb39-12"></a>    <span class="cf">for</span> x <span class="kw">in</span> dataset.Assortment.unique():</span>
+<span id="cb39-13"><a href="#cb39-13"></a>        dataset[<span class="ss">f&#39;Assortment</span><span class="sc">{x.</span>capitalize()<span class="sc">}</span><span class="ss">&#39;</span>] <span class="op">=</span> np.where(dataset.Assortment <span class="op">==</span> x, <span class="dv">1</span>, <span class="dv">0</span>)</span>
+<span id="cb39-14"><a href="#cb39-14"></a>    </span>
+<span id="cb39-15"><a href="#cb39-15"></a>    <span class="cf">return</span> dataset</span></code></pre></div>
+<div class="sourceCode" id="cb40"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb40-1"><a href="#cb40-1"></a><span class="kw">def</span> streamline(df, unnecessary_cols):</span>
+<span id="cb40-2"><a href="#cb40-2"></a>    <span class="co">&quot;&quot;&quot;Streamline df for ExhaustiveFeatureSelector by removing unnecessary columns&quot;&quot;&quot;</span></span>
+<span id="cb40-3"><a href="#cb40-3"></a>    <span class="cf">return</span> df.drop(columns<span class="op">=</span>unnecessary_cols)</span></code></pre></div>
+<div class="sourceCode" id="cb41"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb41-1"><a href="#cb41-1"></a><span class="kw">def</span> prepare_training_set(start_date, end_date, unnecessary_cols):</span>
+<span id="cb41-2"><a href="#cb41-2"></a>    <span class="co">&quot;&quot;&quot;Prepare training set for given dates with single function&quot;&quot;&quot;</span></span>
+<span id="cb41-3"><a href="#cb41-3"></a>    dataset <span class="op">=</span> integrated.loc[integrated.Date <span class="op">&gt;=</span> start_date]<span class="op">\</span></span>
+<span id="cb41-4"><a href="#cb41-4"></a>                    .loc[integrated.Date <span class="op">&lt;=</span> end_date]</span>
+<span id="cb41-5"><a href="#cb41-5"></a>    dataset <span class="op">=</span> only_open(dataset)</span>
+<span id="cb41-6"><a href="#cb41-6"></a>    dataset, trend <span class="op">=</span> find_trend(dataset)</span>
+<span id="cb41-7"><a href="#cb41-7"></a>    dataset, mapper <span class="op">=</span> get_averages(dataset)</span>
+<span id="cb41-8"><a href="#cb41-8"></a>    dataset <span class="op">=</span> create_dummies(dataset)</span>
+<span id="cb41-9"><a href="#cb41-9"></a>    dataset <span class="op">=</span> streamline(dataset, unnecessary_cols)</span>
+<span id="cb41-10"><a href="#cb41-10"></a>    <span class="cf">return</span> dataset, trend, mapper</span></code></pre></div>
+<p>Similarly we need to prepare the data for our validation dataset, making sure not to compute the averages and trend directly (thus invalidating our claim that we are forecasting the unknown future), but rather impute them on the assumption that they will be the same as those for our sampled training set.</p>
+<div class="sourceCode" id="cb42"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb42-1"><a href="#cb42-1"></a><span class="kw">def</span> extend_trend(naive_trend, validation_set):</span>
+<span id="cb42-2"><a href="#cb42-2"></a>    <span class="co">&quot;&quot;&quot;Extend (naively extracted) trend from training set to validation set&quot;&quot;&quot;</span></span>
+<span id="cb42-3"><a href="#cb42-3"></a>    validation_set[<span class="st">&#39;DayNumber&#39;</span>] <span class="op">=</span> validation_set.Date.dt.dayofyear <span class="op">\</span></span>
+<span id="cb42-4"><a href="#cb42-4"></a>                    <span class="op">+</span> (validation_set.Date.dt.year <span class="op">-</span> <span class="dv">2013</span>)<span class="op">*</span><span class="dv">365</span></span>
+<span id="cb42-5"><a href="#cb42-5"></a>    validation_set[<span class="st">&#39;NaiveTrend&#39;</span>] <span class="op">=</span> <span class="dv">0</span></span>
+<span id="cb42-6"><a href="#cb42-6"></a>    <span class="cf">for</span> i <span class="kw">in</span> validation_set.Store.unique():</span>
+<span id="cb42-7"><a href="#cb42-7"></a>        validation_set[<span class="st">&#39;NaiveTrend&#39;</span>] <span class="op">=</span> np.where(validation_set.Store<span class="op">==</span>i,</span>
+<span id="cb42-8"><a href="#cb42-8"></a>                                        validation_set.DayNumber<span class="op">*</span>naive_trend[i].params[<span class="st">&#39;DayNumber&#39;</span>] <span class="op">\</span></span>
+<span id="cb42-9"><a href="#cb42-9"></a>                                         <span class="op">+</span> naive_trend[i].params[<span class="st">&#39;Intercept&#39;</span>],</span>
+<span id="cb42-10"><a href="#cb42-10"></a>                                         validation_set[<span class="st">&#39;NaiveTrend&#39;</span>])</span>
+<span id="cb42-11"><a href="#cb42-11"></a>    <span class="cf">return</span> validation_set</span></code></pre></div>
+<div class="sourceCode" id="cb43"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb43-1"><a href="#cb43-1"></a><span class="kw">def</span> impute_averages(validation_set, averages_mapper):</span>
+<span id="cb43-2"><a href="#cb43-2"></a>    <span class="co">&quot;&quot;&quot;Impute averages from training set to validation set&quot;&quot;&quot;</span></span>
+<span id="cb43-3"><a href="#cb43-3"></a></span>
+<span id="cb43-4"><a href="#cb43-4"></a>    mapper <span class="op">=</span> averages_mapper</span>
+<span id="cb43-5"><a href="#cb43-5"></a>    validation_set[<span class="st">&#39;Month&#39;</span>] <span class="op">=</span> validation_set[<span class="st">&#39;Date&#39;</span>].dt.month</span>
+<span id="cb43-6"><a href="#cb43-6"></a>    </span>
+<span id="cb43-7"><a href="#cb43-7"></a>    length <span class="op">=</span> [<span class="st">&#39;Month&#39;</span>,<span class="st">&#39;DayOfWeek&#39;</span>]</span>
+<span id="cb43-8"><a href="#cb43-8"></a>    df_list <span class="op">=</span> []</span>
+<span id="cb43-9"><a href="#cb43-9"></a>    df_store <span class="op">=</span> {}</span>
+<span id="cb43-10"><a href="#cb43-10"></a>    </span>
+<span id="cb43-11"><a href="#cb43-11"></a>    <span class="co">## iterate through Stores</span></span>
+<span id="cb43-12"><a href="#cb43-12"></a>    <span class="cf">for</span> store <span class="kw">in</span> validation_set.Store.unique():</span>
+<span id="cb43-13"><a href="#cb43-13"></a>        df_store[store] <span class="op">=</span> validation_set.loc[validation_set.Store<span class="op">==</span>store]</span>
+<span id="cb43-14"><a href="#cb43-14"></a>        </span>
+<span id="cb43-15"><a href="#cb43-15"></a>        <span class="co">## iterate through list of time periods</span></span>
+<span id="cb43-16"><a href="#cb43-16"></a>        <span class="cf">for</span> l <span class="kw">in</span> length:</span>
+<span id="cb43-17"><a href="#cb43-17"></a>            df_store[store][<span class="ss">f&#39;AverageFor</span><span class="sc">{l}</span><span class="ss">&#39;</span>] <span class="op">=</span> <span class="dv">0</span></span>
+<span id="cb43-18"><a href="#cb43-18"></a>            </span>
+<span id="cb43-19"><a href="#cb43-19"></a>            <span class="co">## iterate over unique months/days of week</span></span>
+<span id="cb43-20"><a href="#cb43-20"></a>            <span class="cf">for</span> i <span class="kw">in</span> validation_set[l].unique():</span>
+<span id="cb43-21"><a href="#cb43-21"></a>                <span class="co">## get mean Sales value</span></span>
+<span id="cb43-22"><a href="#cb43-22"></a>                df_store[store][<span class="ss">f&#39;AverageFor</span><span class="sc">{l}</span><span class="ss">&#39;</span>] <span class="op">=</span> np.where(</span>
+<span id="cb43-23"><a href="#cb43-23"></a>                    df_store[store][l]<span class="op">==</span>i,</span>
+<span id="cb43-24"><a href="#cb43-24"></a>                    df_store[store][l].<span class="bu">map</span>(mapper[store][l]),</span>
+<span id="cb43-25"><a href="#cb43-25"></a>                    df_store[store][<span class="ss">f&#39;AverageFor</span><span class="sc">{l}</span><span class="ss">&#39;</span>])</span>
+<span id="cb43-26"><a href="#cb43-26"></a>                </span>
+<span id="cb43-27"><a href="#cb43-27"></a>        D <span class="op">=</span> df_store[store].AverageForDayOfWeek <span class="op">\</span></span>
+<span id="cb43-28"><a href="#cb43-28"></a>                                    <span class="op">/</span> df_store[store].AverageForDayOfWeek.mean()</span>
+<span id="cb43-29"><a href="#cb43-29"></a>        T <span class="op">=</span> df_store[store].NaiveTrend <span class="op">/</span> df_store[store].NaiveTrend.mean()</span>
+<span id="cb43-30"><a href="#cb43-30"></a>        df_store[store][<span class="st">&#39;MTD&#39;</span>] <span class="op">=</span> df_store[store].AverageForMonth <span class="op">*</span> T <span class="op">*</span> D</span>
+<span id="cb43-31"><a href="#cb43-31"></a>        df_list.append(df_store[store])</span>
+<span id="cb43-32"><a href="#cb43-32"></a>        </span>
+<span id="cb43-33"><a href="#cb43-33"></a>    validation_set <span class="op">=</span> pd.concat(df_list).sort_index()</span>
+<span id="cb43-34"><a href="#cb43-34"></a>    </span>
+<span id="cb43-35"><a href="#cb43-35"></a>    <span class="cf">return</span>(validation_set)</span></code></pre></div>
+<div class="sourceCode" id="cb44"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb44-1"><a href="#cb44-1"></a><span class="kw">def</span> predict_sales(model, row):</span>
+<span id="cb44-2"><a href="#cb44-2"></a>    <span class="co">&quot;&quot;&quot;Apply model to row to predict sales&quot;&quot;&quot;</span></span>
+<span id="cb44-3"><a href="#cb44-3"></a>    predictors <span class="op">=</span> <span class="bu">list</span>(model.keys())</span>
+<span id="cb44-4"><a href="#cb44-4"></a>    predictors.remove(<span class="st">&#39;Intercept&#39;</span>)</span>
+<span id="cb44-5"><a href="#cb44-5"></a>    prediction <span class="op">=</span> model[<span class="st">&#39;Intercept&#39;</span>]</span>
+<span id="cb44-6"><a href="#cb44-6"></a>    <span class="cf">for</span> p <span class="kw">in</span> predictors:</span>
+<span id="cb44-7"><a href="#cb44-7"></a>        prediction <span class="op">+=</span> row[p] <span class="op">*</span> model[p]</span>
+<span id="cb44-8"><a href="#cb44-8"></a>    <span class="cf">return</span> prediction</span></code></pre></div>
+<div class="sourceCode" id="cb45"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb45-1"><a href="#cb45-1"></a><span class="kw">def</span> prepare_validation_set(start_date, end_date, training_set, mapper, training_trend, unnecessary):</span>
+<span id="cb45-2"><a href="#cb45-2"></a>    <span class="co">&quot;&quot;&quot;Prepare validation dataset&quot;&quot;&quot;</span></span>
+<span id="cb45-3"><a href="#cb45-3"></a>    validation_set <span class="op">=</span> integrated.loc[start_date <span class="op">&lt;=</span> integrated.Date]<span class="op">\</span></span>
+<span id="cb45-4"><a href="#cb45-4"></a>                                .loc[integrated.Date <span class="op">&lt;=</span> end_date]</span>
+<span id="cb45-5"><a href="#cb45-5"></a>    validation_sales <span class="op">=</span> validation_set.loc[validation_set[<span class="st">&#39;Open&#39;</span>]<span class="op">==</span><span class="dv">1</span>][<span class="st">&#39;Sales&#39;</span>]</span>
+<span id="cb45-6"><a href="#cb45-6"></a>    validation_set <span class="op">=</span> validation_set.drop(columns<span class="op">=</span><span class="st">&#39;Sales&#39;</span>)</span>
+<span id="cb45-7"><a href="#cb45-7"></a>    validation_set <span class="op">=</span> extend_trend(training_trend, validation_set)</span>
+<span id="cb45-8"><a href="#cb45-8"></a>    validation_set <span class="op">=</span> impute_averages(validation_set, mapper)</span>
+<span id="cb45-9"><a href="#cb45-9"></a>    validation_set <span class="op">=</span> validation_set.loc[validation_set[<span class="st">&#39;Open&#39;</span>]<span class="op">==</span><span class="dv">1</span>]</span>
+<span id="cb45-10"><a href="#cb45-10"></a>    validation_set <span class="op">=</span> create_dummies(validation_set)</span>
+<span id="cb45-11"><a href="#cb45-11"></a>    validation_set <span class="op">=</span> validation_set.drop(columns<span class="op">=</span>unnecessary)   </span>
+<span id="cb45-12"><a href="#cb45-12"></a>    </span>
+<span id="cb45-13"><a href="#cb45-13"></a>    <span class="cf">return</span> validation_set, validation_sales</span></code></pre></div>
+<div class="sourceCode" id="cb46"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb46-1"><a href="#cb46-1"></a><span class="kw">def</span> validate_predictions(model, validation_set, validation_sales):</span>
+<span id="cb46-2"><a href="#cb46-2"></a>    <span class="co">&quot;&quot;&quot;Return RMSPE scores on validation data for prediction model&quot;&quot;&quot;</span></span>
+<span id="cb46-3"><a href="#cb46-3"></a>    predictions <span class="op">=</span> validation_set.<span class="bu">apply</span>(<span class="kw">lambda</span> x: predict_sales(model, x),axis<span class="op">=</span><span class="dv">1</span>)</span>
+<span id="cb46-4"><a href="#cb46-4"></a>    <span class="cf">return</span> rmspe(validation_sales, predictions)</span></code></pre></div>
+<div class="sourceCode" id="cb47"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb47-1"><a href="#cb47-1"></a></span>
+<span id="cb47-2"><a href="#cb47-2"></a><span class="kw">def</span> pandas_df_to_markdown_table(df):</span>
+<span id="cb47-3"><a href="#cb47-3"></a>    <span class="co">&quot;Round table figures and print as markdown table&quot;</span></span>
+<span id="cb47-4"><a href="#cb47-4"></a></span>
+<span id="cb47-5"><a href="#cb47-5"></a>    df <span class="op">=</span> df.<span class="bu">round</span>(<span class="dv">3</span>)</span>
+<span id="cb47-6"><a href="#cb47-6"></a>    df <span class="op">=</span> df.reset_index()</span>
+<span id="cb47-7"><a href="#cb47-7"></a>    fmt <span class="op">=</span> [<span class="st">&#39;---&#39;</span> <span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(<span class="bu">len</span>(df.columns))]</span>
+<span id="cb47-8"><a href="#cb47-8"></a>    df_fmt <span class="op">=</span> pd.DataFrame([fmt], columns<span class="op">=</span>df.columns)</span>
+<span id="cb47-9"><a href="#cb47-9"></a>    df_formatted <span class="op">=</span> pd.concat([df_fmt, df])</span>
+<span id="cb47-10"><a href="#cb47-10"></a>    <span class="bu">print</span>(df_formatted.to_csv(sep<span class="op">=</span><span class="st">&quot;|&quot;</span>, index<span class="op">=</span><span class="va">False</span>))</span></code></pre></div>
+<h2 id="results">Results</h2>
+<h3 id="first-iteration-first-eighteen-months">First Iteration: First Eighteen Months</h3>
+<p>We first train a model on the first eighteen months of data, and validate it on the following six months. If the validation confirms the adequacy of our model, then we can use our estimated values to fill in the six month gap for the 180 stores that we discovered in our data cleaning stage are missing data for those dates.</p>
+<div class="sourceCode" id="cb48"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb48-1"><a href="#cb48-1"></a>unnecessary <span class="op">=</span> [</span>
+<span id="cb48-2"><a href="#cb48-2"></a>    <span class="st">&#39;Store&#39;</span>,</span>
+<span id="cb48-3"><a href="#cb48-3"></a>    <span class="st">&#39;Customers&#39;</span>,</span>
+<span id="cb48-4"><a href="#cb48-4"></a>    <span class="st">&#39;Open&#39;</span>,</span>
+<span id="cb48-5"><a href="#cb48-5"></a>    <span class="st">&#39;StateHoliday&#39;</span>,</span>
+<span id="cb48-6"><a href="#cb48-6"></a>    <span class="st">&#39;StoreType&#39;</span>,</span>
+<span id="cb48-7"><a href="#cb48-7"></a>    <span class="st">&#39;Assortment&#39;</span>,</span>
+<span id="cb48-8"><a href="#cb48-8"></a>    <span class="st">&#39;CompetitionDistance&#39;</span>,</span>
+<span id="cb48-9"><a href="#cb48-9"></a>    <span class="st">&#39;CompetitionDate&#39;</span>,</span>
+<span id="cb48-10"><a href="#cb48-10"></a>    <span class="st">&#39;Promo2Date&#39;</span>,</span>
+<span id="cb48-11"><a href="#cb48-11"></a>    <span class="st">&#39;PromoInterval&#39;</span>,</span>
+<span id="cb48-12"><a href="#cb48-12"></a>    <span class="st">&#39;Month&#39;</span>,</span>
+<span id="cb48-13"><a href="#cb48-13"></a>    <span class="st">&#39;DayOfWeek&#39;</span>,</span>
+<span id="cb48-14"><a href="#cb48-14"></a>    <span class="st">&#39;DayNumber&#39;</span>,</span>
+<span id="cb48-15"><a href="#cb48-15"></a>    <span class="st">&#39;NaiveTrend&#39;</span>, </span>
+<span id="cb48-16"><a href="#cb48-16"></a>    <span class="st">&#39;AverageForMonth&#39;</span>, </span>
+<span id="cb48-17"><a href="#cb48-17"></a>    <span class="st">&#39;AverageForDayOfWeek&#39;</span>,</span>
+<span id="cb48-18"><a href="#cb48-18"></a>]</span></code></pre></div>
+<div class="sourceCode" id="cb49"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb49-1"><a href="#cb49-1"></a>start_date <span class="op">=</span> Timestamp(<span class="dv">2013</span>,<span class="dv">1</span>,<span class="dv">1</span>)</span>
+<span id="cb49-2"><a href="#cb49-2"></a>end_date <span class="op">=</span> Timestamp(<span class="dv">2014</span>,<span class="dv">6</span>,<span class="dv">30</span>)</span>
+<span id="cb49-3"><a href="#cb49-3"></a>processed_18, trend, mapper <span class="op">=</span> prepare_training_set(start_date, end_date, unnecessary)</span>
+<span id="cb49-4"><a href="#cb49-4"></a>v_set, v_sales <span class="op">=</span> prepare_validation_set(</span>
+<span id="cb49-5"><a href="#cb49-5"></a>    Timestamp(<span class="dv">2014</span>,<span class="dv">7</span>,<span class="dv">1</span>), Timestamp(<span class="dv">2014</span>,<span class="dv">12</span>,<span class="dv">31</span>), </span>
+<span id="cb49-6"><a href="#cb49-6"></a>    processed_18, mapper, trend, unnecessary)</span>
+<span id="cb49-7"><a href="#cb49-7"></a>processed_18 <span class="op">=</span> streamline(processed_18, [<span class="st">&#39;Date&#39;</span>])</span>
+<span id="cb49-8"><a href="#cb49-8"></a>best <span class="op">=</span> suggest_best_predictors(processed_18, <span class="dv">3</span>)</span>
+<span id="cb49-9"><a href="#cb49-9"></a>models, results <span class="op">=</span> fit_models(best)</span>
+<span id="cb49-10"><a href="#cb49-10"></a>v_score <span class="op">=</span> {}</span></code></pre></div>
+<div class="sourceCode" id="cb50"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb50-1"><a href="#cb50-1"></a><span class="cf">for</span> i <span class="kw">in</span> models.keys():</span>
+<span id="cb50-2"><a href="#cb50-2"></a>    v_score[i] <span class="op">=</span> validate_predictions(models[i], v_set, v_sales)</span>
+<span id="cb50-3"><a href="#cb50-3"></a>results[<span class="st">&#39;Val. RMSPE&#39;</span>] <span class="op">=</span> pd.DataFrame(v_score, index<span class="op">=</span>[<span class="st">&#39;Score&#39;</span>]).T</span>
+<span id="cb50-4"><a href="#cb50-4"></a>pandas_df_to_markdown_table(results)</span></code></pre></div>
+<pre><code>Features|Intercept|MTD|Promo|TypeB|RMSPE|Val. RMSPE
+---|---|---|---|---|---|---
+1|58.591|0.991|||7.443|13.754
+2|-587.809|0.965|1914.375||5.473|9.538
+3|-580.602|0.963|1916.183|232.116|5.465|9.518</code></pre>
+<p>Our method suggests three possible models, all of which seem to hold up on validation.</p>
+<h3 id="second-iteration-impute-estimates-and-validate-further">Second Iteration: Impute Estimates and Validate Further</h3>
+<p>Inspection of the code suggests that I chose the single-feature model, and the reason will be because of computational efficiency: rerunning the notebook as I worked on the analysis would be quicker with a simpler model.</p>
+<p>Also, using the model to impute estimates for the missing six months is a non-trivial exercise. Before doing so, we must first generate the relevant data for those dates, since details like which days those 180 stores were open for during that time period, and whether or not they ran a <code>Promo</code> are all unknown.I estimated answers by saying that the pattern was identical as for the same day in the same week the previous year.</p>
+<div class="sourceCode" id="cb52"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb52-1"><a href="#cb52-1"></a><span class="co">## Impute model estimates for missing six months</span></span>
+<span id="cb52-2"><a href="#cb52-2"></a></span>
+<span id="cb52-3"><a href="#cb52-3"></a><span class="co">## generate dates</span></span>
+<span id="cb52-4"><a href="#cb52-4"></a>d_range <span class="op">=</span> pd.date_range(Timestamp(<span class="dv">2014</span>,<span class="dv">7</span>,<span class="dv">1</span>),Timestamp(<span class="dv">2014</span>,<span class="dv">12</span>,<span class="dv">31</span>))</span>
+<span id="cb52-5"><a href="#cb52-5"></a></span>
+<span id="cb52-6"><a href="#cb52-6"></a><span class="co">## find out details (ie. holiday, day of week) of dates from those with data</span></span>
+<span id="cb52-7"><a href="#cb52-7"></a>six_months <span class="op">=</span> integrated.loc[integrated.Date <span class="op">&gt;=</span> Timestamp(<span class="dv">2014</span>,<span class="dv">7</span>,<span class="dv">1</span>)]<span class="op">\</span></span>
+<span id="cb52-8"><a href="#cb52-8"></a>                    .loc[integrated.Date <span class="op">&lt;=</span> Timestamp(<span class="dv">2014</span>,<span class="dv">12</span>,<span class="dv">31</span>)]</span>
+<span id="cb52-9"><a href="#cb52-9"></a>details, info, df <span class="op">=</span> {}, {}, {}</span>
+<span id="cb52-10"><a href="#cb52-10"></a><span class="cf">for</span> d <span class="kw">in</span> d_range:</span>
+<span id="cb52-11"><a href="#cb52-11"></a>    details[d] <span class="op">=</span> {}</span>
+<span id="cb52-12"><a href="#cb52-12"></a>    details[d][<span class="st">&#39;StateHoliday&#39;</span>] <span class="op">=</span> six_months.loc[six_months.Date<span class="op">==</span>d].StateHoliday.describe().top</span>
+<span id="cb52-13"><a href="#cb52-13"></a>    details[d][<span class="st">&#39;SchoolHoliday&#39;</span>] <span class="op">=</span> six_months.loc[six_months.Date<span class="op">==</span>d].SchoolHoliday.median()</span>
+<span id="cb52-14"><a href="#cb52-14"></a>    details[d][<span class="st">&#39;DayOfWeek&#39;</span>] <span class="op">=</span> six_months.loc[six_months.Date<span class="op">==</span>d].DayOfWeek.median()</span>
+<span id="cb52-15"><a href="#cb52-15"></a></span>
+<span id="cb52-16"><a href="#cb52-16"></a><span class="co">## we will assume that stores with no data for the second half of 2014,</span></span>
+<span id="cb52-17"><a href="#cb52-17"></a><span class="co">## ... had exactly the same pattern of being `Open` and doing a `Promo` as they did the year before</span></span>
+<span id="cb52-18"><a href="#cb52-18"></a>i <span class="op">=</span> <span class="dv">0</span></span>
+<span id="cb52-19"><a href="#cb52-19"></a><span class="cf">for</span> store <span class="kw">in</span> stores:</span>
+<span id="cb52-20"><a href="#cb52-20"></a>    info[store] <span class="op">=</span> {}</span>
+<span id="cb52-21"><a href="#cb52-21"></a>    store_df <span class="op">=</span> integrated.loc[integrated.Store <span class="op">==</span> store]</span>
+<span id="cb52-22"><a href="#cb52-22"></a>    store_df <span class="op">=</span> store_df.loc[store_df.Date.dt.year <span class="op">==</span> <span class="dv">2013</span>]</span>
+<span id="cb52-23"><a href="#cb52-23"></a>    <span class="cf">for</span> d <span class="kw">in</span> d_range:</span>
+<span id="cb52-24"><a href="#cb52-24"></a>        info[store][d] <span class="op">=</span> {}</span>
+<span id="cb52-25"><a href="#cb52-25"></a>        day <span class="op">=</span> d.dayofweek</span>
+<span id="cb52-26"><a href="#cb52-26"></a>        week <span class="op">=</span> d.week</span>
+<span id="cb52-27"><a href="#cb52-27"></a>        last_year <span class="op">=</span> store_df.loc[(</span>
+<span id="cb52-28"><a href="#cb52-28"></a>            store_df.Date.dt.week <span class="op">==</span> week) <span class="op">&amp;</span> (store_df.Date.dt.dayofweek <span class="op">==</span> day)]</span>
+<span id="cb52-29"><a href="#cb52-29"></a>        info[store][d][<span class="st">&#39;Open&#39;</span>] <span class="op">=</span> last_year.Open.values[<span class="dv">0</span>]</span>
+<span id="cb52-30"><a href="#cb52-30"></a>        info[store][d][<span class="st">&#39;Promo&#39;</span>] <span class="op">=</span> last_year.Promo.values[<span class="dv">0</span>]</span>
+<span id="cb52-31"><a href="#cb52-31"></a>        </span>
+<span id="cb52-32"><a href="#cb52-32"></a>        df[i] <span class="op">=</span> {<span class="st">&#39;Store&#39;</span>: store,</span>
+<span id="cb52-33"><a href="#cb52-33"></a>                <span class="st">&#39;Date&#39;</span>: d,</span>
+<span id="cb52-34"><a href="#cb52-34"></a>                <span class="st">&#39;Open&#39;</span>: info[store][d][<span class="st">&#39;Open&#39;</span>],</span>
+<span id="cb52-35"><a href="#cb52-35"></a>                <span class="st">&#39;Promo&#39;</span>: info[store][d][<span class="st">&#39;Promo&#39;</span>],</span>
+<span id="cb52-36"><a href="#cb52-36"></a>                <span class="st">&#39;StateHoliday&#39;</span>: details[d][<span class="st">&#39;StateHoliday&#39;</span>],</span>
+<span id="cb52-37"><a href="#cb52-37"></a>                <span class="st">&#39;SchoolHoliday&#39;</span>: details[d][<span class="st">&#39;SchoolHoliday&#39;</span>],</span>
+<span id="cb52-38"><a href="#cb52-38"></a>                <span class="st">&#39;DayOfWeek&#39;</span>: details[d][<span class="st">&#39;DayOfWeek&#39;</span>]}</span>
+<span id="cb52-39"><a href="#cb52-39"></a>        i <span class="op">+=</span> <span class="dv">1</span></span>
+<span id="cb52-40"><a href="#cb52-40"></a></span>
+<span id="cb52-41"><a href="#cb52-41"></a>estimates <span class="op">=</span> pd.DataFrame(df).T</span>
+<span id="cb52-42"><a href="#cb52-42"></a>estimates <span class="op">=</span> extend_trend(trend, estimates)</span>
+<span id="cb52-43"><a href="#cb52-43"></a>estimates <span class="op">=</span> impute_averages(estimates, mapper)</span>
+<span id="cb52-44"><a href="#cb52-44"></a>estimates[<span class="st">&#39;Sales&#39;</span>] <span class="op">=</span> estimates.<span class="bu">apply</span>(<span class="kw">lambda</span> x: predict_sales(models[<span class="dv">1</span>], x), axis<span class="op">=</span><span class="dv">1</span>)</span>
+<span id="cb52-45"><a href="#cb52-45"></a>estimates[<span class="st">&#39;Sales&#39;</span>] <span class="op">=</span> np.where(estimates.Open<span class="op">==</span><span class="dv">0</span>, <span class="dv">0</span>, estimates[<span class="st">&#39;Sales&#39;</span>])</span>
+<span id="cb52-46"><a href="#cb52-46"></a></span>
+<span id="cb52-47"><a href="#cb52-47"></a>storetype, assortment, promo2 <span class="op">=</span> {}, {}, {}</span>
+<span id="cb52-48"><a href="#cb52-48"></a><span class="cf">for</span> store <span class="kw">in</span> stores:</span>
+<span id="cb52-49"><a href="#cb52-49"></a>    storetype[store] <span class="op">=</span> store_data.loc[store_data.Store <span class="op">==</span> store].StoreType.values[<span class="dv">0</span>]</span>
+<span id="cb52-50"><a href="#cb52-50"></a>    assortment[store] <span class="op">=</span> store_data.loc[store_data.Store <span class="op">==</span> store].Assortment.values[<span class="dv">0</span>]</span>
+<span id="cb52-51"><a href="#cb52-51"></a>    promo2[store] <span class="op">=</span> store_data.loc[store_data.Store <span class="op">==</span> store].Promo2.values[<span class="dv">0</span>]</span>
+<span id="cb52-52"><a href="#cb52-52"></a></span>
+<span id="cb52-53"><a href="#cb52-53"></a>estimates[<span class="st">&#39;StoreType&#39;</span>] <span class="op">=</span> estimates.Store.<span class="bu">map</span>(storetype)</span>
+<span id="cb52-54"><a href="#cb52-54"></a>estimates[<span class="st">&#39;Assortment&#39;</span>] <span class="op">=</span> estimates.Store.<span class="bu">map</span>(assortment)</span>
+<span id="cb52-55"><a href="#cb52-55"></a>estimates[<span class="st">&#39;Promo2&#39;</span>] <span class="op">=</span> estimates.Store.<span class="bu">map</span>(promo2)</span>
+<span id="cb52-56"><a href="#cb52-56"></a></span>
+<span id="cb52-57"><a href="#cb52-57"></a>integrated <span class="op">=</span> pd.merge(integrated,estimates,how<span class="op">=</span><span class="st">&#39;outer&#39;</span>).sort_index()</span></code></pre></div>
+<p>Once the estimates have been imputed, we perform the second iteration of our method, this time training on all the (now synthetically complete) data from the first two years and three months, and validating on the subsequent three months.</p>
+<div class="sourceCode" id="cb53"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb53-1"><a href="#cb53-1"></a><span class="co">## validate estimates</span></span>
+<span id="cb53-2"><a href="#cb53-2"></a>start_date <span class="op">=</span> Timestamp(<span class="dv">2013</span>,<span class="dv">1</span>,<span class="dv">1</span>)</span>
+<span id="cb53-3"><a href="#cb53-3"></a>end_date <span class="op">=</span> Timestamp(<span class="dv">2015</span>,<span class="dv">3</span>,<span class="dv">31</span>)</span>
+<span id="cb53-4"><a href="#cb53-4"></a>processed_filled, trend, mapper <span class="op">=</span> prepare_training_set(start_date, end_date, unnecessary)</span>
+<span id="cb53-5"><a href="#cb53-5"></a>v_set2, v_sales2 <span class="op">=</span> prepare_validation_set(</span>
+<span id="cb53-6"><a href="#cb53-6"></a>    Timestamp(<span class="dv">2015</span>,<span class="dv">4</span>,<span class="dv">1</span>), Timestamp(<span class="dv">2015</span>,<span class="dv">6</span>,<span class="dv">30</span>), </span>
+<span id="cb53-7"><a href="#cb53-7"></a>    processed_filled, mapper, trend, unnecessary)</span>
+<span id="cb53-8"><a href="#cb53-8"></a>processed_filled <span class="op">=</span> streamline(processed_filled, [<span class="st">&#39;Date&#39;</span>])</span>
+<span id="cb53-9"><a href="#cb53-9"></a>best <span class="op">=</span> suggest_best_predictors(processed_filled, <span class="dv">3</span>)</span>
+<span id="cb53-10"><a href="#cb53-10"></a>models, results2 <span class="op">=</span> fit_models(best)</span>
+<span id="cb53-11"><a href="#cb53-11"></a>v_score <span class="op">=</span> {} </span>
+<span id="cb53-12"><a href="#cb53-12"></a><span class="cf">for</span> i <span class="kw">in</span> models.keys():</span>
+<span id="cb53-13"><a href="#cb53-13"></a>    v_score[i] <span class="op">=</span> validate_predictions(models[i], v_set2, v_sales2)</span>
+<span id="cb53-14"><a href="#cb53-14"></a>results2[<span class="st">&#39;Val. RMSPE&#39;</span>] <span class="op">=</span> pd.DataFrame(v_score, index<span class="op">=</span>[<span class="st">&#39;Score&#39;</span>]).T</span>
+<span id="cb53-15"><a href="#cb53-15"></a>pandas_df_to_markdown_table(results2)</span></code></pre></div>
+<pre><code>Features|Intercept|MTD|Promo|TypeB|RMSPE|Val. RMSPE
+---|---|---|---|---|---|---
+1|57.769|0.991|||8.338|5.575
+2|-584.408|0.967|1826.938||6.011|3.879
+3|-576.754|0.965|1828.743|231.384|6.003|3.868</code></pre>
+<p>Our attempt to use estimated data to complete the set on which we train our models seems to have worked incredibly well. The unseen validation set now has an error of less than 5% if we take the two-variable model.</p>
+<p>It does seem surprising that the RMSPE on the unseen validation data is significantly better than the RMSPE on the training data itself, but this can be explained by the fact that we are validating on data near the middle of the year (from the start of April through until the end of June, in this case), and much of the error will come from the end-of-year spike (as suggested by Figure 3).</p>
+<h3 id="third-iteration-hyper-personalized-models">Third Iteration: Hyper-Personalized Models</h3>
+<p>At this point we have a fairly good model:</p>
+<p><span class="math display">\[\hat{S} = \alpha + \beta\zeta_{i} + \gamma\delta_{P} \pm e = S \]</span></p>
+<p>with <span class="math inline">\(\mathbb{E}(| e |) &lt; \frac{1}{10}S\)</span>.</p>
+<p>We now improve it further, by leaning further in to the initial insight that we should consider each store individually. We might call this our <em>personalization thesis</em>.</p>
+<p>For this final iteration of model development, we use <code>EFS</code> to find a best two-feature additive linear model for each store independently:</p>
+<p><span class="math display">\[\Omega_{i} = \alpha_{i} + \beta_{i}f_{i} + \gamma_{i}g_{i} \pm e_{i} = S_{i} \]</span></p>
+<p>such that we minimize <span class="math inline">\(\mathbb{E}(| e_{i} |)\)</span>, with any two features <span class="math inline">\(f_{i}, g_{i} \in \{ \zeta_{i}, \delta_{P}, \delta_{P_{2}}, \delta_{H_{P}}, \delta_{H_{S}}, \delta_{H_{E}}, \delta_{H_{C}} \}\)</span>.</p>
+<p>We then create a new feature column <code>IndividualModel2</code> with the predicted values of that model for each date and store. And then we run <code>EFS</code> again, including all the stores together, to evaluate the errors and check whether a better score can be found by including any other feature with <code>IndividualModel2</code>.</p>
+<div class="sourceCode" id="cb55"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb55-1"><a href="#cb55-1"></a>start, end <span class="op">=</span> Timestamp(<span class="dv">2013</span>,<span class="dv">1</span>,<span class="dv">1</span>), Timestamp(<span class="dv">2015</span>,<span class="dv">5</span>,<span class="dv">31</span>)</span>
+<span id="cb55-2"><a href="#cb55-2"></a>training_set <span class="op">=</span> integrated.loc[integrated.Date <span class="op">&gt;=</span> start]<span class="op">\</span></span>
+<span id="cb55-3"><a href="#cb55-3"></a>                    .loc[integrated.Date <span class="op">&lt;=</span> end]</span>
+<span id="cb55-4"><a href="#cb55-4"></a>validation_set <span class="op">=</span> integrated.loc[integrated.Date <span class="op">&gt;=</span> Timestamp(<span class="dv">2015</span>,<span class="dv">6</span>,<span class="dv">1</span>)]<span class="op">\</span></span>
+<span id="cb55-5"><a href="#cb55-5"></a>                    .loc[integrated.Date <span class="op">&lt;=</span> Timestamp(<span class="dv">2015</span>,<span class="dv">7</span>,<span class="dv">31</span>)]</span>
+<span id="cb55-6"><a href="#cb55-6"></a>df_store, vdf_store, trend_store <span class="op">=</span> {}, {}, {}</span>
+<span id="cb55-7"><a href="#cb55-7"></a>best_predictors, models_store, results_store <span class="op">=</span> {}, {}, {}</span>
+<span id="cb55-8"><a href="#cb55-8"></a>processed_3, trend, mapper <span class="op">=</span> prepare_training_set(start, end, unnecessary)</span>
+<span id="cb55-9"><a href="#cb55-9"></a>v_set3, v_sales3 <span class="op">=</span> prepare_validation_set(</span>
+<span id="cb55-10"><a href="#cb55-10"></a>    Timestamp(<span class="dv">2015</span>,<span class="dv">6</span>,<span class="dv">1</span>), Timestamp(<span class="dv">2015</span>,<span class="dv">7</span>,<span class="dv">31</span>),</span>
+<span id="cb55-11"><a href="#cb55-11"></a>    processed_3, mapper, trend, unnecessary)</span></code></pre></div>
+<div class="sourceCode" id="cb56"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb56-1"><a href="#cb56-1"></a><span class="co">## for each store we reduce the training_data and validation_set</span></span>
+<span id="cb56-2"><a href="#cb56-2"></a><span class="co">## ...to that relevant to the store, and then do exhaustive feature selection</span></span>
+<span id="cb56-3"><a href="#cb56-3"></a><span class="co">## ... to suggest the best predictors </span></span>
+<span id="cb56-4"><a href="#cb56-4"></a>processed_3.drop(columns<span class="op">=</span><span class="st">&#39;Date&#39;</span>, inplace<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb56-5"><a href="#cb56-5"></a><span class="cf">for</span> store <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">1</span>,n<span class="op">+</span><span class="dv">1</span>):</span>
+<span id="cb56-6"><a href="#cb56-6"></a>    df_store[store] <span class="op">=</span> processed_3.loc[training_set.Store <span class="op">==</span> store]</span>
+<span id="cb56-7"><a href="#cb56-7"></a>    vdf_store[store] <span class="op">=</span> v_set3.loc[validation_set.Store <span class="op">==</span> store]</span>
+<span id="cb56-8"><a href="#cb56-8"></a>    best_predictors[store] <span class="op">=</span> suggest_best_predictors(df_store[store], <span class="dv">2</span>)</span>
+<span id="cb56-9"><a href="#cb56-9"></a>    models_store[store], results_store[store] <span class="op">=</span> fit_models(best_predictors[store])</span></code></pre></div>
+<div class="sourceCode" id="cb57"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb57-1"><a href="#cb57-1"></a>predictions <span class="op">=</span> {}</span>
+<span id="cb57-2"><a href="#cb57-2"></a><span class="cf">for</span> store <span class="kw">in</span> training_set.Store.unique():</span>
+<span id="cb57-3"><a href="#cb57-3"></a>    <span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">1</span>,<span class="dv">3</span>):</span>
+<span id="cb57-4"><a href="#cb57-4"></a>        df_store[store][<span class="ss">f&#39;IndividualModel</span><span class="sc">{i}</span><span class="ss">&#39;</span>] <span class="op">=</span> df_store[store].<span class="bu">apply</span>(</span>
+<span id="cb57-5"><a href="#cb57-5"></a>            <span class="kw">lambda</span> x: predict_sales(models_store[store][i], x), axis<span class="op">=</span><span class="dv">1</span>)</span>
+<span id="cb57-6"><a href="#cb57-6"></a>        vdf_store[store][<span class="ss">f&#39;IndividualModel</span><span class="sc">{i}</span><span class="ss">&#39;</span>] <span class="op">=</span> vdf_store[store].<span class="bu">apply</span>(</span>
+<span id="cb57-7"><a href="#cb57-7"></a>            <span class="kw">lambda</span> x: predict_sales(models_store[store][i], x), axis<span class="op">=</span><span class="dv">1</span>)</span></code></pre></div>
+<div class="sourceCode" id="cb58"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb58-1"><a href="#cb58-1"></a>df_list, vdf_list <span class="op">=</span> [], []</span>
+<span id="cb58-2"><a href="#cb58-2"></a><span class="cf">for</span> store <span class="kw">in</span> training_set.Store.unique():</span>
+<span id="cb58-3"><a href="#cb58-3"></a>    df_list.append(df_store[store])</span>
+<span id="cb58-4"><a href="#cb58-4"></a>    vdf_list.append(vdf_store[store])</span>
+<span id="cb58-5"><a href="#cb58-5"></a>ind_training <span class="op">=</span> pd.concat(df_list)</span>
+<span id="cb58-6"><a href="#cb58-6"></a>ind_valid <span class="op">=</span> pd.concat(vdf_list).drop(columns<span class="op">=</span><span class="st">&#39;Date&#39;</span>)</span>
+<span id="cb58-7"><a href="#cb58-7"></a><span class="co">## v_set3.drop(columns=&#39;Date&#39;, inplace=True)</span></span>
+<span id="cb58-8"><a href="#cb58-8"></a><span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">1</span>,<span class="dv">3</span>):</span>
+<span id="cb58-9"><a href="#cb58-9"></a>    processed_3[<span class="ss">f&#39;IndividualModel</span><span class="sc">{i}</span><span class="ss">&#39;</span>] <span class="op">=</span> ind_training[<span class="ss">f&#39;IndividualModel</span><span class="sc">{i}</span><span class="ss">&#39;</span>]</span>
+<span id="cb58-10"><a href="#cb58-10"></a>    v_set3[<span class="ss">f&#39;IndividualModel</span><span class="sc">{i}</span><span class="ss">&#39;</span>] <span class="op">=</span> ind_valid[<span class="ss">f&#39;IndividualModel</span><span class="sc">{i}</span><span class="ss">&#39;</span>]</span></code></pre></div>
+<div class="sourceCode" id="cb59"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb59-1"><a href="#cb59-1"></a></span>
+<span id="cb59-2"><a href="#cb59-2"></a>best3 <span class="op">=</span> suggest_best_predictors(processed_3, <span class="dv">3</span>)</span>
+<span id="cb59-3"><a href="#cb59-3"></a>models, results3 <span class="op">=</span> fit_models(best3)</span>
+<span id="cb59-4"><a href="#cb59-4"></a>v_score <span class="op">=</span> {} </span>
+<span id="cb59-5"><a href="#cb59-5"></a><span class="cf">for</span> i <span class="kw">in</span> models.keys():</span>
+<span id="cb59-6"><a href="#cb59-6"></a>    v_score[i] <span class="op">=</span> validate_predictions(models[i], v_set3, v_sales3)</span>
+<span id="cb59-7"><a href="#cb59-7"></a>results3[<span class="st">&#39;Val. RMSPE&#39;</span>] <span class="op">=</span> pd.DataFrame(v_score, index<span class="op">=</span>[<span class="st">&#39;Score&#39;</span>]).T</span>
+<span id="cb59-8"><a href="#cb59-8"></a>pandas_df_to_markdown_table(results3)</span></code></pre></div>
+<pre><code>Features|Intercept|EasterHoliday|IndividualModel2|Promo|RMSPE|Val.
+RMSPE
+---|---|---|---|---|---|---
+1|0.0||1.0||4.803|2.566
+2|0.382||0.998|23.864|4.798|2.558
+3|0.356|-89.409|0.998|23.841|4.797|2.558</code></pre>
+<p>This does indeed give improved model performance, and it seems likely our model would perform very well against the test data.</p>
+<h2 id="interpretation-and-conclusions">Interpretation and Conclusions</h2>
+<p>More interesting though than just an improved RMSPE score, is that we can now interrogate the details of each store’s best-performing <code>IndividualModel2</code> (<span class="math inline">\(\Omega_{i}\)</span>) to see what, if anything, the specific details may reveal. Indeed, our method has also yielded an <code>IndividualModel1</code>, a best single-feature model for each store.</p>
+<p>This means we can see for each store which feature was the most powerful predictor, and which was second. We tabulate the aggregate scores in Table 4 (leaving out the two-feature case from any models which failed to improve the RMSPE score by more than 0.1, meaning the optimum model had already been found).</p>
+<div class="sourceCode" id="cb61"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb61-1"><a href="#cb61-1"></a>improvements <span class="op">=</span> {}</span>
+<span id="cb61-2"><a href="#cb61-2"></a><span class="cf">for</span> store <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">1</span>, n<span class="op">+</span><span class="dv">1</span>):</span>
+<span id="cb61-3"><a href="#cb61-3"></a>    improvements[store] <span class="op">=</span> results_store[store].RMSPE[<span class="dv">1</span>]<span class="op">\</span></span>
+<span id="cb61-4"><a href="#cb61-4"></a>                    <span class="op">-</span> results_store[store].RMSPE[<span class="dv">2</span>]</span>
+<span id="cb61-5"><a href="#cb61-5"></a></span>
+<span id="cb61-6"><a href="#cb61-6"></a>improvement <span class="op">=</span> pd.DataFrame(improvements, index<span class="op">=</span> [<span class="st">&#39;Improvement&#39;</span>]).T</span>
+<span id="cb61-7"><a href="#cb61-7"></a>no_improvement <span class="op">=</span> improvement.loc[improvement.Improvement<span class="op">&lt;</span><span class="fl">0.1</span>].index</span>
+<span id="cb61-8"><a href="#cb61-8"></a></span>
+<span id="cb61-9"><a href="#cb61-9"></a>predictor_scores <span class="op">=</span> {}</span>
+<span id="cb61-10"><a href="#cb61-10"></a><span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">1</span>,<span class="dv">3</span>):</span>
+<span id="cb61-11"><a href="#cb61-11"></a>    predictor_scores[i] <span class="op">=</span> {}</span>
+<span id="cb61-12"><a href="#cb61-12"></a><span class="cf">for</span> store <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">1</span>, n<span class="op">+</span><span class="dv">1</span>):</span>
+<span id="cb61-13"><a href="#cb61-13"></a>    <span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">1</span>, <span class="dv">3</span>):</span>
+<span id="cb61-14"><a href="#cb61-14"></a>        <span class="cf">for</span> p <span class="kw">in</span> best_predictors[store][i]:</span>
+<span id="cb61-15"><a href="#cb61-15"></a>            <span class="cf">if</span> <span class="kw">not</span> (store <span class="kw">in</span> no_improvement <span class="kw">and</span> i <span class="op">==</span> <span class="dv">2</span>):</span>
+<span id="cb61-16"><a href="#cb61-16"></a>                <span class="cf">try</span>:</span>
+<span id="cb61-17"><a href="#cb61-17"></a>                    predictor_scores[i][p] <span class="op">+=</span> <span class="dv">1</span></span>
+<span id="cb61-18"><a href="#cb61-18"></a>                <span class="cf">except</span>:</span>
+<span id="cb61-19"><a href="#cb61-19"></a>                    predictor_scores[i][p] <span class="op">=</span> <span class="dv">1</span></span>
+<span id="cb61-20"><a href="#cb61-20"></a></span>
+<span id="cb61-21"><a href="#cb61-21"></a>with_one <span class="op">=</span> pd.DataFrame(predictor_scores[<span class="dv">1</span>],index<span class="op">=</span>[<span class="st">&#39;OnePredictor&#39;</span>]).T</span>
+<span id="cb61-22"><a href="#cb61-22"></a>with_two <span class="op">=</span> pd.DataFrame(predictor_scores[<span class="dv">2</span>],index<span class="op">=</span>[<span class="st">&#39;TwoPredictors&#39;</span>]).T</span>
+<span id="cb61-23"><a href="#cb61-23"></a>count_predictors <span class="op">=</span> with_two.join(with_one)</span>
+<span id="cb61-24"><a href="#cb61-24"></a>count_predictors.fillna(<span class="dv">0</span>,inplace<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb61-25"><a href="#cb61-25"></a>count_predictors[<span class="st">&#39;Totals&#39;</span>] <span class="op">=</span> count_predictors.OnePredictor <span class="op">\</span></span>
+<span id="cb61-26"><a href="#cb61-26"></a>                                <span class="op">+</span> count_predictors.TwoPredictors</span>
+<span id="cb61-27"><a href="#cb61-27"></a>count_predictors <span class="op">=</span> count_predictors.astype(<span class="bu">int</span>)</span></code></pre></div>
+<div class="sourceCode" id="cb62"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb62-1"><a href="#cb62-1"></a>pandas_df_to_markdown_table(count_predictors.T)</span></code></pre></div>
+<pre><code>index|Promo|MTD|SchoolHoliday|PublicHoliday|ChristmasHoliday|EasterHoliday
+---|---|---|---|---|---|---
+TwoPredictors|1020|1020|10|19|1|2
+OnePredictor|755|359|0|1|0|0
+Totals|1775|1379|10|20|1|2</code></pre>
+<p>To our surprise, we find that in the <code>OnePredictor</code> case, for more than half of the stores the most powerful predictive feature was simply whether or not there was a <code>Promo</code> on that day – rather than the <code>MTD</code> <span class="math inline">\(\zeta\)</span> value we have calculated.</p>
+<p>We conclude by noting that our models have been simple additive combinations of features – although those features have included processed multiplicative products. If we needed to try and improve our model still further, we should include the product <span class="math inline">\(\zeta\)</span> and <span class="math inline">\(\delta_{P}\)</span>, and perhaps also their products with <code>StateHoliday</code>.</p>
+<p>We also note that because we treated each store individually, the general effect of features particular to stores is hidden: that is, we see <code>Promo</code> and the various types of <code>StateHoliday</code> showing up in our final analysis because they are features of a particular <code>Date</code>; and we do not see <code>StoreType</code> or <code>Assortment</code> because when a store is considered individually those features are constant. Also, we have not in the end considered the effect of <code>Promo2</code> and <code>CompetitionDistance</code>, since their effect is delayed in time and thus complex to detect.</p>
+<h2 class="unnumbered" id="references">References</h2>
+<div id="refs" class="references hanging-indent" role="doc-bibliography">
+<div id="ref-KAbadirMagnus2002">
+<p><span class="csl-baseline">Abadir, K.</span>; <span class="csl-baseline">Magnus, J.</span> 2002. Notation in econometrics: A proposal for a standard. <em>The Econometrics Journal</em> 5: 76–90.</p>
+</div>
+<div id="ref-ELorenz1972">
+<p><span class="csl-baseline">Lorenz, E.N.</span> 1972. Predictability: Does the Flap of a Butterfly’s Wings in Brazil set off a Tornado in Texas..</p>
+</div>
+<div id="ref-WMcKinney2010">
+<p><span class="csl-baseline">McKinney, W.</span> 2010. Data structures for statistical computing in Python. <em>Proceedings of the 9th Python in Science Conference</em> 445: 51–56.</p>
+</div>
+<div id="ref-TOliphant2006">
+<p><span class="csl-baseline">Oliphant, T.E.</span> 2006. <em>Guide to NumPy</em>. Trelgol, Austin, Tex.,.</p>
+</div>
+<div id="ref-RPeng2011">
+<p><span class="csl-baseline">Peng, R.D.</span> 2011. Reproducible research in computational science. <em>Science</em> 334: 1226–1227.</p>
+</div>
+<div id="ref-SRaschka2018">
+<p><span class="csl-baseline">Raschka, S.</span> 2018. MLxtend: Providing machine learning and data science utilities and extensions to Python’s scientific computing stack. <em>Journal of open source software</em> 3: 638.</p>
+</div>
+<div id="ref-FSchorfheideWolpin2012">
+<p><span class="csl-baseline">Schorfheide, F.</span>; <span class="csl-baseline">Wolpin, K.I.</span> 2012. On the Use of Holdout Samples for Model Selection. <em>American Economic Review</em> 102: 477–481.</p>
+</div>
+<div id="ref-Statsmodels2020">
+<p><span class="csl-baseline">Statsmodels</span>. 2020. Add Root Mean Square Percentage Error as rmspe(): Pull Request #6774. <em>GitHub</em>.</p>
+</div>
+</div>
+<!-- <nav id="toc" data-toggle="toc"></nav> -->
+
+</body>
+</html>
